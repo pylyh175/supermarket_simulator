@@ -1,3 +1,9 @@
+/* Hidden must always win — author-origin display rules must not defeat the
+   UA [hidden] semantics, so enforce it once, globally. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;

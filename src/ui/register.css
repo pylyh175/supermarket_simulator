@@ -2,13 +2,8 @@
    Register overlay — cozy Malaysian kopitiam-till feel.
    Cream panel, warm amber accents, soft LCD glow. Never a red error state:
    "too much change" is a gentle amber pulse, not a failure.
+   The page-wide [hidden] guard lives in src/style.css.
    ------------------------------------------------------------------------ */
-
-/* Hidden must always win — author-origin display rules must not defeat the
-   UA [hidden] semantics, so enforce it once, globally. */
-[hidden] {
-  display: none !important;
-}
 
 #register-ui {
   position: fixed;
