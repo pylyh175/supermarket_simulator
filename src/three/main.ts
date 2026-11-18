@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import "../style.css";
 import { WebGLCheck } from "./WebGLCheck";
 import { buildStoreShell } from "./storeShell";
 import { buildStore } from "./storeLayout";
