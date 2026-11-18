@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Supermarket Simulator</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #f5efe0;
+        overflow: hidden;
+      }
+      #game {
+        width: 100%;
+        height: 100%;
+      }
+      #webgl-fallback {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        box-sizing: border-box;
+        padding: 24px;
+        background: #f5efe0;
+        color: #4a3b28;
+        font-family: system-ui, "Segoe UI", "Trebuchet MS", sans-serif;
+        text-align: center;
+        line-height: 1.5;
+      }
+      #webgl-fallback[hidden] {
+        display: none;
+      }
+      #webgl-fallback p {
+        max-width: 32rem;
+        margin: 12px auto;
+      }
+      #money-hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        font-family: system-ui, "Segoe UI", "Trebuchet MS", sans-serif;
+        font-size: 16px;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        color: #4a3b28;
+        background: rgba(253, 246, 233, 0.92);
+        border: 2px solid #caa46a;
+        border-radius: 999px;
+        padding: 6px 16px;
+        box-shadow: 0 2px 8px rgba(46, 32, 12, 0.25);
+        pointer-events: none;
+        user-select: none;
+      }
+      #lock-hint {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+        font-family: system-ui, "Segoe UI", "Trebuchet MS", sans-serif;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        color: #4a3b28;
+        background: rgba(253, 246, 233, 0.92);
+        border: 2px solid #caa46a;
+        border-radius: 999px;
+        padding: 6px 16px;
+        box-shadow: 0 2px 8px rgba(46, 32, 12, 0.25);
+        pointer-events: none;
+        user-select: none;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="webgl-fallback" hidden>
+      <p><strong>WebGL isn't available in this browser.</strong></p>
+      <p>Supermarket Simulator needs WebGL to draw its 3D store. Please try a recent version of Chrome, Edge, Firefox, or Safari — or enable hardware acceleration / WebGL in your browser settings — and reload this page.</p>
+    </div>
+    <div id="money-hud" aria-live="polite">Money: RM0.00</div>
+    <div id="lock-hint" role="status" hidden>Click the canvas to look around</div>
+    <div id="register-ui" hidden>
+      <div class="register-panel" role="dialog" aria-modal="true" aria-label="Register">
+        <!-- Customer line -->
+        <div class="customer-line">
+          <div class="customer-avatar" id="customer-avatar" aria-hidden="true">A</div>
+          <div class="customer-text">
+            <div class="customer-name" id="customer-name">Customer</div>
+            <div class="customer-tender" id="customer-tender">Waiting patiently…</div>
+          </div>
+          <div class="customer-badge">Waiting patiently</div>
+        </div>
+
+        <!-- Conveyor strip -->
+        <div class="conveyor-wrap">
+          <div class="conveyor-belt">
+            <div class="conveyor-label">Conveyor</div>
+            <div id="conveyor" class="conveyor" aria-label="Items to scan"></div>
+            <div class="scanner-arch" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <!-- Register display (LCD) -->
+        <div class="register-display" id="register-display">
+          <div class="lcd-main" id="lcd-main">TOTAL RM0.00</div>
+          <div class="lcd-sub" id="lcd-sub">Waiting for items…</div>
+          <div class="lcd-given" id="lcd-given" hidden>Given so far: RM0.00</div>
+          <div class="too-much" id="too-much" hidden>Too much! Undo the extra, ya.</div>
+          <button class="hint-btn" id="hint-btn" type="button" hidden title="A little help with the change">Hint</button>
+          <div class="hint-tip" id="hint-tip" hidden></div>
+        </div>
+
+        <!-- Change pad (only in the change phase) -->
+        <div id="change-pad" class="change-pad" hidden>
+          <div class="change-pad-label">Change pad — tap denominations to give</div>
+          <div id="denom-buttons" class="denom-buttons"></div>
+          <button id="undo-btn" class="undo-btn" type="button">↺ Undo</button>
+        </div>
+
+        <!-- Thank-you banner -->
+        <div id="thankyou" class="thankyou" hidden>
+          <div class="thankyou-text">Thank you!</div>
+          <div class="thankyou-sub">Terima kasih! Come again, ya.</div>
+        </div>
+
+        <div class="register-footer">E — scan the front item &nbsp;·&nbsp; Esc — abandon sale</div>
+      </div>
+    </div>
+    <script type="module" src="/src/three/main.ts"></script>
+  </body>
+</html>
