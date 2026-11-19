@@ -25,7 +25,14 @@ import {
   WALL_HEIGHT_M,
 } from "./storeShell";
 import type { AssetBundle } from "./assets";
-import { tagProduct } from "../game/hover";
+import {
+  PLANOGRAM,
+  computeFacings,
+  computePlacements,
+  type Placement,
+  type PlacementCell,
+} from "../game/planogram";
+import { buildRailTags } from "../game/railTags";
 
 // ---------------------------------------------------------------------------
 // Layout constants — named, no magic numbers.
@@ -38,8 +45,6 @@ const ROW_X_POSITIONS: readonly number[] = [-6.75, -2.25, 2.25, 6.75];
 /** Index into ROW_X_POSITIONS that uses the low archetype (open sightline). */
 const LOW_ROW_INDEX = 1;
 const ROW_STOCK_MARGIN_M = 0.4;   // keep products clear of the end panels/posts
-const ROW_SIDE_OFFSET_M = 0.14;   // product centre offset from the row centre plane
-const SLOT_SPACING_M = 0.35;
 /** Raycast must start above the tallest shelf board and clear the 2 m cap. */
 const ROW_TOP_RAY_Y = 3.0;
 /** Boards whose top is within this of the shelf cap are left bare (too high). */
@@ -181,58 +186,144 @@ function addBox(
 
 const DOWN = new THREE.Vector3(0, -1, 0);
 
+// Reused for every placement matrix — never allocated per unit.
+const PLACEMENT_MATRIX = new THREE.Matrix4();
+/** All-white instance color — stamping slot 0 once compiles the instancingColor variant at load. */
+const INSTANCE_WHITE = new THREE.Color(1, 1, 1);
+const PLACEMENT_POSITION = new THREE.Vector3();
+const PLACEMENT_QUATERNION = new THREE.Quaternion();
+const PLACEMENT_EULER = new THREE.Euler();
+const UNIT_SCALE = new THREE.Vector3(1, 1, 1);
+/** Reused cell — mutated per face, consumed immediately by computePlacements. */
+const PLACEMENT_CELL: PlacementCell = { rowX: 0, boardY: 0, centerZ: ROW_CENTER_Z };
+
+/**
+ * Running stocking state threaded through every row. `faceIndex` enumerates the
+ * board faces in fixed order — row 0 → row 3, board 0 (lowest stocked board) →
+ * board n, side +1 (front) → side −1 (back) — and selects the SKU list via
+ * `PLANOGRAM[faceIndex % PLANOGRAM.length]`. `placementsBySku` accumulates one
+ * Placement per unit across ALL rows; buildStore bakes one InstancedMesh per
+ * SKU from it after the last row is stocked.
+ */
+interface StockAccumulator {
+  faceIndex: number;
+  placementsBySku: Map<string, Placement[]>;
+}
+
 function stockShelfRow(
   scene: THREE.Scene,
   row: THREE.Object3D,
   rowHeight: number,
   rowIndex: number,
   bundle: AssetBundle,
-  cursor: { value: number },
+  stock: StockAccumulator,
 ): void {
-  const products = [...bundle.products.entries()];
-  if (products.length === 0) return;
+  if (bundle.products.size === 0) return;
 
   const usable = ROW_LENGTH_M - 2 * ROW_STOCK_MARGIN_M;
-  const slotCount = Math.floor(usable / SLOT_SPACING_M);
-  const slotSpan = (slotCount - 1) * SLOT_SPACING_M;
   const ray = new THREE.Raycaster();
   ray.far = ROW_TOP_RAY_Y;
   const boardLimitY = rowHeight - ROW_TOP_EXCLUDE_M;
 
-  for (let slot = 0; slot < slotCount; slot += 1) {
-    const slotOffset = slot * SLOT_SPACING_M - slotSpan / 2;
-    // rotation.y = π/2 maps local +X to world -Z, so walk world -Z as local +X grows.
-    const worldZ = ROW_CENTER_Z - slotOffset;
+  // The boards span the full row length, so one mid-row ray sees every stocked
+  // board — stocking the face once per board (not once per slot) is what makes
+  // the planogram placements land exactly once each. Ray hits arrive top-down;
+  // sort ascending so boardIndex 0 is the lowest stocked board.
+  ray.set(new THREE.Vector3(ROW_X_POSITIONS[rowIndex], ROW_TOP_RAY_Y, ROW_CENTER_Z), DOWN);
+  const hits = ray.intersectObject(row, true);
 
-    ray.set(new THREE.Vector3(ROW_X_POSITIONS[rowIndex], ROW_TOP_RAY_Y, worldZ), DOWN);
-    const hits = ray.intersectObject(row, true);
+  // Cluster hit heights (several faces of one board land within an epsilon).
+  const boardYs: number[] = [];
+  for (const hit of hits) {
+    const y = hit.point.y;
+    if (y > boardLimitY) continue;
+    if (boardYs.some((b) => Math.abs(b - y) < BOARD_CLUSTER_EPSILON_M)) continue;
+    boardYs.push(y);
+  }
+  boardYs.sort((a, b) => a - b);
+  // Drift guard: the low procedural fallback shelf yields 2 boards (not the
+  // glTF's 1), silently remapping faceIndex and shifting the documented
+  // planogram — warn, don't change detection.
+  const expectedBoards = rowIndex === LOW_ROW_INDEX ? 1 : 3;
+  if (boardYs.length !== expectedBoards) {
+    console.warn(`[storeLayout] Row ${rowIndex} detected ${boardYs.length} board(s), expected ${expectedBoards} for the ${rowIndex === LOW_ROW_INDEX ? "low" : "tall"} archetype — faceIndex will remap.`);
+  }
 
-    // Cluster hit heights (several faces of one board land within an epsilon).
-    const boardYs: number[] = [];
-    for (const hit of hits) {
-      const y = hit.point.y;
-      if (y > boardLimitY) continue;
-      if (boardYs.some((b) => Math.abs(b - y) < BOARD_CLUSTER_EPSILON_M)) continue;
-      boardYs.push(y);
-    }
-
-    for (let board = 0; board < boardYs.length; board += 1) {
-      for (const side of [1, -1] as const) {
-        // Every viable slot is stocked — no thinning skip.
-        const [productId, archetype] = products[cursor.value % products.length];
-        const product = archetype.clone(true);
-        tagProduct(product, productId);
-        cursor.value += 1;
-        // Side = +1 → east face (+X): product must face outward (+X).
-        product.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
-        product.position.set(
-          ROW_X_POSITIONS[rowIndex] + side * ROW_SIDE_OFFSET_M,
-          boardYs[board] + 0.002,
-          worldZ,
-        );
-        scene.add(product);
+  for (let board = 0; board < boardYs.length; board += 1) {
+    for (const side of [1, -1] as const) {
+      // Row-major face order: row → board (bottom → top) → side (+1 → −1).
+      const faceIndex = stock.faceIndex;
+      stock.faceIndex += 1;
+      // side +1 = east face (+X) = "front" (fills −z → +z); side −1 mirrors.
+      // computePlacements emits x = rowX + side × inwardOffset and
+      // rotationY = +π/2 / −π/2 — the same side-sign and rotation convention
+      // the old clone loop used (rotation.y = side > 0 ? π/2 : −π/2).
+      const face = side > 0 ? "front" : "back";
+      const faceSkus = PLANOGRAM[faceIndex % PLANOGRAM.length];
+      const facings = computeFacings(faceSkus, usable);
+      PLACEMENT_CELL.rowX = ROW_X_POSITIONS[rowIndex];
+      PLACEMENT_CELL.boardY = boardYs[board];
+      PLACEMENT_CELL.centerZ = ROW_CENTER_Z;
+      const placements = computePlacements(facings, face, PLACEMENT_CELL, side);
+      buildRailTags(scene, facings, face, PLACEMENT_CELL, side);
+      for (const placement of placements) {
+        const bucket = stock.placementsBySku.get(placement.skuId);
+        if (bucket) {
+          bucket.push(placement);
+        } else {
+          stock.placementsBySku.set(placement.skuId, [placement]);
+        }
       }
     }
+  }
+}
+
+/**
+ * Bake one InstancedMesh per SKU from the placements collected across every
+ * row/face. Geometry and materials are shared with the archetype product's
+ * single child Mesh; instances are stamped with userData.productId on the
+ * InstancedMesh itself (resolved by main.ts's productIdOf walk).
+ *
+ * computePlacements y is the pack BASE (board top + a hair), while the child
+ * mesh's geometry is vertically centred — so each instance lifts by the
+ * child's local y (height / 2) to reproduce the old clone placement exactly.
+ */
+function addInstancedProducts(
+  scene: THREE.Scene,
+  bundle: AssetBundle,
+  placementsBySku: Map<string, Placement[]>,
+): void {
+  for (const [productId, placements] of placementsBySku) {
+    if (placements.length === 0) continue;
+    const archetype = bundle.products.get(productId);
+    const child = archetype?.children[0] as THREE.Mesh | undefined;
+    if (!child || !child.isMesh) {
+      console.warn(
+        `[storeLayout] Product "${productId}" has no child mesh — ${placements.length} placement(s) skipped.`,
+      );
+      continue;
+    }
+    const mesh = new THREE.InstancedMesh(child.geometry, child.material, placements.length);
+    mesh.userData.productId = productId;
+    // Warm up the instancingColor program variant at load — identity tint, no
+    // first-aim recompile hitch.
+    mesh.setColorAt(0, INSTANCE_WHITE);
+    const childLiftY = child.position.y;
+    for (let index = 0; index < placements.length; index += 1) {
+      const placement = placements[index];
+      PLACEMENT_EULER.set(0, placement.rotationY, 0);
+      PLACEMENT_QUATERNION.setFromEuler(PLACEMENT_EULER);
+      PLACEMENT_POSITION.set(placement.x, placement.y + childLiftY, placement.z);
+      PLACEMENT_MATRIX.compose(PLACEMENT_POSITION, PLACEMENT_QUATERNION, UNIT_SCALE);
+      mesh.setMatrixAt(index, PLACEMENT_MATRIX);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.count !== placements.length) {
+      throw new Error(
+        `[storeLayout] InstancedMesh "${productId}" count mismatch: ${mesh.count} !== ${placements.length}`,
+      );
+    }
+    scene.add(mesh);
   }
 }
 
@@ -242,7 +333,7 @@ function buildShelfRow(
   rowIndex: number,
   colliders: Aabb[],
   bundle: AssetBundle,
-  stockCursor: { value: number },
+  stock: StockAccumulator,
 ): void {
   const row = archetype.clone(true);
   const rawLength = measureBox(row).getSize(new THREE.Vector3()).x;
@@ -257,7 +348,7 @@ function buildShelfRow(
 
   const height = measureBox(row).getSize(new THREE.Vector3()).y;
   colliders.push(footprintCollider(row));
-  stockShelfRow(scene, row, height, rowIndex, bundle, stockCursor);
+  stockShelfRow(scene, row, height, rowIndex, bundle, stock);
 }
 
 // ---------------------------------------------------------------------------
@@ -460,16 +551,19 @@ export function buildStore(scene: THREE.Scene, bundle: AssetBundle): Aabb[] {
   // Shelves: 4 double-sided rows; one low archetype for a clear sightline.
   const tallShelf = bundle.shelves[0];
   const lowShelf = bundle.shelves[1] ?? bundle.shelves[0];
+  const stock: StockAccumulator = { faceIndex: 0, placementsBySku: new Map() };
   if (tallShelf) {
-    const stockCursor = { value: 0 };
     for (let i = 0; i < ROW_X_POSITIONS.length; i += 1) {
       const archetype = i === LOW_ROW_INDEX ? lowShelf : tallShelf;
       if (!archetype) continue; // bundle always ships 2 shelves; stay defensive
-      buildShelfRow(scene, archetype, i, colliders, bundle, stockCursor);
+      buildShelfRow(scene, archetype, i, colliders, bundle, stock);
     }
   } else {
     console.warn("[storeLayout] Asset bundle has no shelves — aisle rows skipped.");
   }
+
+  // One InstancedMesh per SKU from the placements collected above (all rows).
+  addInstancedProducts(scene, bundle, stock.placementsBySku);
 
   // Till + hanging KEDAI RUNCIT sign (bottom-centre).
   buildCheckoutCounter(scene, bundle, colliders);
