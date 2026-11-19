@@ -8,7 +8,9 @@ import { FpsController } from "../player/FpsController";
 import { eyeHeightM } from "../player/movement";
 import { Customers3D } from "../game/customers3d";
 import { TillStation } from "../game/TillStation";
+import { CheckoutFlow } from "./checkoutFlow";
 import { RegisterController } from "../ui/RegisterController";
+import { playBeep, playPlip, primeAudio } from "../audio/cues";
 import { formatRinggit } from "../register/money";
 import { loadGame, saveGame } from "../state/save";
 import { resolveTooltip, TOOLTIP_MAX_DISTANCE_M } from "../game/hover";
@@ -90,8 +92,22 @@ function boot(): void {
   // While the till is "open" the player is frozen in place; mouse-look is
   // already dead because we exit pointer lock.
   let playerFrozen = false;
+  // The POS strip no longer covers the canvas, so a click above it would
+  // re-lock the pointer mid-sale and steal the cursor from the change pad.
+  // Keep the old modal input behaviour: ignore canvas clicks while frozen
+  // (the view stays put; the belt is still visible above the strip).
+  renderer.domElement.addEventListener(
+    "click",
+    (event) => {
+      if (playerFrozen) event.stopImmediatePropagation();
+    },
+    true,
+  );
   // Filled once the asset bundle resolves (customers come from the bundle).
   let customers: Customers3D | null = null;
+  // Belt/bag/tote props + item pipeline; built with the store bundle so the
+  // hover snapshot includes the props as occluders.
+  let checkoutFlow: CheckoutFlow | null = null;
 
   // -------------------------------------------------------------------------
   // Hover tooltip + crosshair (Task 3). A center-screen raycast shows a
@@ -277,11 +293,22 @@ function boot(): void {
 
   // One traverse per call. Run at boot (after the store + first customer
   // exist) and again on every customer spawn/despawn via syncHoverCandidates.
+  // Hidden groups (the checkout tote between sales) must not ghost as
+  // invisible occluders — three's raycaster ignores Object3D.visible.
+  const isVisibleInScene = (obj: THREE.Object3D): boolean => {
+    let cur: THREE.Object3D | null = obj;
+    while (cur) {
+      if (!cur.visible) return false;
+      cur = cur.parent;
+    }
+    return true;
+  };
   const collectHoverCandidates = (): void => {
     const candidates: THREE.Mesh[] = [];
     scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (!mesh.isMesh) return;
+      if (!isVisibleInScene(mesh)) return;
       // Rail tag planes are zero-thickness prints; excluded from the hover ray so packs behind them remain hoverable.
       if (mesh.userData?.isRailTag === true) return;
       candidates.push(mesh);
@@ -328,6 +355,14 @@ function boot(): void {
   // Plain-DOM register overlay (Task 7). The 2D Phaser scene is gone; the
   // controller renders straight into index.html's #register-ui skeleton.
   const registerController = new RegisterController();
+  // The 3D belt owns the scan tempo and the cues; the register only asks.
+  // Before the bundle resolves (or if the belt failed to build) the gate
+  // stays open so the overlay remains usable.
+  registerController.canScan = () => checkoutFlow?.canScan() ?? true;
+  registerController.onItemScanned = () => {
+    checkoutFlow?.onItemScanned();
+    playBeep();
+  };
   // Cash-in-till, integer sen. Task 8: loaded from the save at boot before
   // the first HUD render (no RM0.00 flash), and persisted on every completed
   // sale inside creditMoney() — the one place money changes hands.
@@ -364,6 +399,10 @@ function boot(): void {
     // a dead mouse with no explanation. Show a transient pill for ~3 s; FpsController's
     // click handler does the actual re-lock on the player's next click.
     showLockHint();
+    // ANY close path clears the belt and hides the tote. The bag and its
+    // content persist (abandon never touches them); a completed sale has
+    // already bagged every scanned pack during the payment/thank-you beats.
+    checkoutFlow?.abandon();
     // ANY close path (exact change, or Escape abandon) sends the customer on
     // their way; only a completed sale credits the till.
     customers?.completeService();
@@ -399,6 +438,10 @@ function boot(): void {
     setLabelsHidden(true);
     setCrosshairHidden(true);
     hideHover();
+    // This keypress is the user gesture that unlocks WebAudio, and the sale
+    // starts the customer's placement tosses.
+    primeAudio();
+    checkoutFlow?.begin(customer);
     registerController.open(customer);
     // Register-ui is up now — keep the dot hidden (it stays hidden even if
     // the lock exit hasn't landed yet).
@@ -419,6 +462,16 @@ function boot(): void {
       } catch (error) {
         // Store stays unbuilt but the game still boots on shell colliders.
         console.error("[main] buildStore failed — props not shown.", error);
+      }
+      // Checkout belt: built with the bundle so its belt/bag/tote props are in
+      // the scene before the hover snapshot below. A failure leaves the
+      // register fully usable (canScan falls back to true).
+      try {
+        checkoutFlow = new CheckoutFlow(scene, bundle);
+        checkoutFlow.onItemPlaced = playPlip;
+      } catch (error) {
+        checkoutFlow = null;
+        console.error("[main] Checkout flow setup failed — belt disabled.", error);
       }
       // Customer flow — bundle ships the 3 capsule variants.
       try {
@@ -443,6 +496,9 @@ function boot(): void {
     // dead — pointer lock was exited). The camera still tracks the spot.
     if (!playerFrozen) player.update(dt);
     customers?.update(dt);
+    // The belt keeps moving while the player is frozen at the till — that is
+    // exactly when its placement/slide/bag animations matter.
+    checkoutFlow?.update(dt);
     // Customers add/remove meshes inside update() — rebuild the hover
     // snapshot if the active customer changed this frame.
     syncHoverCandidates();
