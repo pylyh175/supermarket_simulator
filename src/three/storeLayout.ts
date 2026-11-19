@@ -25,6 +25,7 @@ import {
   WALL_HEIGHT_M,
 } from "./storeShell";
 import type { AssetBundle } from "./assets";
+import { tagProduct } from "../game/hover";
 
 // ---------------------------------------------------------------------------
 // Layout constants — named, no magic numbers.
@@ -38,14 +39,12 @@ const ROW_X_POSITIONS: readonly number[] = [-6.75, -2.25, 2.25, 6.75];
 const LOW_ROW_INDEX = 1;
 const ROW_STOCK_MARGIN_M = 0.4;   // keep products clear of the end panels/posts
 const ROW_SIDE_OFFSET_M = 0.14;   // product centre offset from the row centre plane
-const SLOT_SPACING_M = 0.62;
+const SLOT_SPACING_M = 0.35;
 /** Raycast must start above the tallest shelf board and clear the 2 m cap. */
 const ROW_TOP_RAY_Y = 3.0;
 /** Boards whose top is within this of the shelf cap are left bare (too high). */
 const ROW_TOP_EXCLUDE_M = 0.38;
 const BOARD_CLUSTER_EPSILON_M = 0.03;
-/** Roughly one empty slot in eleven — shelves read "stocked, not shrink-wrapped". */
-const STOCK_SKIP_MOD = 11;
 
 // Checkout counter + till (bottom-centre, facing the spawn). Exported so the
 // customer flow and the till station zone anchor to the same spot.
@@ -190,7 +189,7 @@ function stockShelfRow(
   bundle: AssetBundle,
   cursor: { value: number },
 ): void {
-  const products = [...bundle.products.values()];
+  const products = [...bundle.products.entries()];
   if (products.length === 0) return;
 
   const usable = ROW_LENGTH_M - 2 * ROW_STOCK_MARGIN_M;
@@ -219,10 +218,10 @@ function stockShelfRow(
 
     for (let board = 0; board < boardYs.length; board += 1) {
       for (const side of [1, -1] as const) {
-        // Deterministic thinning so the shelves look stocked, not shrink-wrapped.
-        const stamp = slot * 31 + board * 7 + (side > 0 ? 0 : 1) + rowIndex * 13;
-        if (stamp % STOCK_SKIP_MOD === 0) continue;
-        const product = products[cursor.value % products.length].clone(true);
+        // Every viable slot is stocked — no thinning skip.
+        const [productId, archetype] = products[cursor.value % products.length];
+        const product = archetype.clone(true);
+        tagProduct(product, productId);
         cursor.value += 1;
         // Side = +1 → east face (+X): product must face outward (+X).
         product.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;

@@ -256,9 +256,13 @@ const FALLBACK_SPEC: ProductSpec = {
   brand: "PRODUK", variant: "", detail: "",
 };
 
-/** Render a product label onto a canvas. `wide` stretches it for tins. */
-function makeProductLabel(spec: ProductSpec, seed: string, wide: boolean): THREE.CanvasTexture {
-  const width = wide ? 512 : 256;
+/**
+ * Render a product label onto a canvas. Pack colors + accent pinstripe +
+ * faux barcode only — every word of brand/variant/detail text has been
+ * stripped (names are shown via the 3D hover tooltip instead).
+ */
+function makeProductLabel(spec: ProductSpec, seed: string): THREE.CanvasTexture {
+  const width = 256;
   const height = 256;
   const [canvas, ctx] = makeCanvas(width, height);
 
@@ -269,26 +273,16 @@ function makeProductLabel(spec: ProductSpec, seed: string, wide: boolean): THREE
   ctx.fillStyle = spec.accent;
   ctx.fillRect(0, 0, width, 14);
 
-  const midX = width / 2;
-  const maxText = width - 28;
-  drawFitted(ctx, spec.brand, midX, 108, maxText, spec.brand.length > 9 ? 44 : 58, FONT_STACK, spec.brandFg);
-  if (spec.variant) {
-    drawFitted(ctx, spec.variant, midX, 148, maxText, 24, FONT_BODY, spec.brandFg);
-  }
-
-  // Bottom band: detail text + faux barcode. Text color is picked from
-  // the accent's luminance so it stays readable on every pack.
+  // Bottom band: faux barcode only. Barcode colour is picked from the
+  // accent's luminance so it stays readable on every pack.
   ctx.fillStyle = spec.accent;
   ctx.fillRect(0, height - 54, width, 54);
   const bandFg = contrastOn(spec.accent);
-  if (spec.detail) {
-    drawFitted(ctx, spec.detail, midX - (wide ? 60 : 0), height - 21, wide ? width - 190 : maxText - 60, 19, FONT_BODY, bandFg);
-  }
   ctx.save();
   ctx.beginPath();
-  ctx.rect(width - (wide ? 130 : 104), height - 48, wide ? 120 : 92, 40);
+  ctx.rect(width - 104, height - 48, 92, 40);
   ctx.clip();
-  drawBarcode(ctx, seed, width - (wide ? 120 : 96), height - 46, wide ? 92 : 72, 34, bandFg);
+  drawBarcode(ctx, seed, width - 96, height - 46, 72, 34, bandFg);
   ctx.restore();
 
   return toTexture(canvas);
@@ -298,6 +292,8 @@ function buildProduct(productId: string, name: string): THREE.Group {
   const spec = PRODUCT_SPECS[productId] ?? { ...FALLBACK_SPEC, brand: name.toUpperCase().slice(0, 22) };
   const group = new THREE.Group();
   group.name = `product:${productId}`;
+  // Belt-and-braces identity: placement also tags each clone via tagProduct.
+  group.userData.productId = productId;
 
   const lambert = (color: string): THREE.MeshLambertMaterial =>
     new THREE.MeshLambertMaterial({ color, flatShading: true });
@@ -305,7 +301,7 @@ function buildProduct(productId: string, name: string): THREE.Group {
   if (spec.shape === "tin") {
     const [diameter, height] = spec.size;
     const radius = diameter / 2;
-    const sideLabel = makeProductLabel(spec, productId, true);
+    const sideLabel = makeProductLabel(spec, productId);
     const sideMat = new THREE.MeshLambertMaterial({ map: sideLabel, flatShading: true });
     const capMat = lambert(spec.accent);
     const bodyMat = lambert(spec.side);
@@ -321,7 +317,7 @@ function buildProduct(productId: string, name: string): THREE.Group {
   // put the label on the top face instead of the thin front strip.
   const labelOnTop = spec.shape === "tray" || height < 0.08;
   // One label canvas per box — reused on the top face when applicable.
-  const labelMat = new THREE.MeshLambertMaterial({ map: makeProductLabel(spec, productId, false), flatShading: true });
+  const labelMat = new THREE.MeshLambertMaterial({ map: makeProductLabel(spec, productId), flatShading: true });
   const topMat = labelOnTop ? labelMat : lambert(spec.body);
   const faceMat = labelOnTop ? sideMat : labelMat;
   // Box faces: +x, -x, +y, -y, +z, -z.
@@ -565,6 +561,7 @@ function buildEmergencyBundle(onStage?: AssetStageCallback): AssetBundle {
     const [width, height, depth] = spec.size;
     const group = new THREE.Group();
     group.name = `product:${product.id}`;
+    group.userData.productId = product.id;
     const box = new THREE.Mesh(
       new THREE.BoxGeometry(width, height, depth),
       new THREE.MeshLambertMaterial({ color: spec.body, flatShading: true }),
