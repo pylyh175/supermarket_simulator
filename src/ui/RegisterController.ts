@@ -20,27 +20,6 @@ import type { Customer } from "../customers/generate";
 
 const PAY_BEAT_MS = 1000;
 const THANK_YOU_MS = 1000;
-const NOPE_SHAKE_MS = 360;
-
-/** Cozy flat palette for the conveyor chips, picked by a hash of the product id. */
-const CHIP_COLORS = [
-  "#f2b8a0",
-  "#a8d5a2",
-  "#f7d774",
-  "#9cc3e5",
-  "#d5b3e3",
-  "#f4a7b9",
-  "#bfe3d0",
-  "#e8c39e",
-];
-
-function chipColorFor(id: string): string {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) | 0;
-  }
-  return CHIP_COLORS[Math.abs(hash) % CHIP_COLORS.length];
-}
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -65,6 +44,19 @@ export type RegisterCloseHandler = (result: RegisterClose) => void;
  * closes with completed=true. The close callback fires exactly once.
  */
 export class RegisterController {
+  /**
+   * Optional gate for the E path: return false while the front belt pack is
+   * still sliding, so a scan can never consume a session item before the 3D
+   * belt is ready. Defaults to true for callers with no belt.
+   */
+  canScan: () => boolean = () => true;
+
+  /**
+   * Fired after E consumes the next session item. main.ts hooks this to the
+   * checkout belt (`CheckoutFlow.onItemScanned`) and the scan cue.
+   */
+  onItemScanned: (() => void) | null = null;
+
   private customer: Customer | null = null;
   private session: Session | null = null;
   private closed = true;
@@ -73,14 +65,12 @@ export class RegisterController {
   private hintOpen = false;
   private paymentTimer: number | null = null;
   private finishTimer: number | null = null;
-  private nopeTimer: number | null = null;
   private closeHandler: RegisterCloseHandler | null = null;
 
   private readonly root: HTMLElement;
   private readonly avatarEl: HTMLElement;
   private readonly nameEl: HTMLElement;
   private readonly tenderEl: HTMLElement;
-  private readonly conveyorEl: HTMLElement;
   private readonly lcdMainEl: HTMLElement;
   private readonly lcdSubEl: HTMLElement;
   private readonly lcdGivenEl: HTMLElement;
@@ -97,7 +87,6 @@ export class RegisterController {
     this.avatarEl = requireElement("customer-avatar");
     this.nameEl = requireElement("customer-name");
     this.tenderEl = requireElement("customer-tender");
-    this.conveyorEl = requireElement("conveyor");
     this.lcdMainEl = requireElement("lcd-main");
     this.lcdSubEl = requireElement("lcd-sub");
     this.lcdGivenEl = requireElement("lcd-given");
@@ -133,7 +122,6 @@ export class RegisterController {
     this.hintOpen = false;
     this.clearTimers();
 
-    this.buildChips();
     window.addEventListener("keydown", this.onKeyDown);
     this.root.hidden = false;
     this.render();
@@ -148,7 +136,9 @@ export class RegisterController {
     if (this.closed || !this.session) return;
     if (event.code === "KeyE") {
       event.preventDefault();
-      this.scanFrontmost();
+      // The 3D belt owns the scan tempo: ignore E until the front pack has
+      // actually reached the scanner (no session/belt desync).
+      if (this.canScan()) this.scanFrontmost();
       return;
     }
     if (event.code === "Escape") {
@@ -160,37 +150,6 @@ export class RegisterController {
   };
 
   // ---- Building blocks ------------------------------------------------------
-
-  private buildChips(): void {
-    const session = this.session;
-    if (!session) return;
-    this.conveyorEl.innerHTML = "";
-    session.items.forEach((item, index) => {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "chip";
-      chip.style.setProperty("--i", String(index));
-      chip.style.setProperty("--chip", chipColorFor(item.id));
-      chip.setAttribute("aria-label", `Scan ${item.name}`);
-
-      const name = document.createElement("span");
-      name.className = "chip-name";
-      name.textContent = item.name;
-
-      const price = document.createElement("span");
-      price.className = "chip-price";
-      price.textContent = formatRinggit(item.priceSen);
-
-      const tick = document.createElement("span");
-      tick.className = "chip-tick";
-      tick.textContent = "✓";
-      tick.setAttribute("aria-hidden", "true");
-
-      chip.append(name, price, tick);
-      chip.addEventListener("click", () => this.onChipClick(index, chip));
-      this.conveyorEl.appendChild(chip);
-    });
-  }
 
   private buildChangePad(): void {
     this.denomButtonsEl.innerHTML = "";
@@ -224,33 +183,17 @@ export class RegisterController {
     };
   }
 
-  private onChipClick(index: number, chip: HTMLButtonElement): void {
-    const session = this.session;
-    if (this.closed || !session || session.phase !== "scanning") {
-      return;
-    }
-    chip.blur();
-    // The scanner sits at one spot — only the frontmost unscanned chip can be
-    // scanned; tapping a later chip gets a friendly wobble instead.
-    if (index === session.scanned) {
-      this.scanFrontmost();
-      return;
-    }
-    if (index > session.scanned) {
-      chip.classList.remove("nope");
-      void chip.offsetWidth; // restart the animation
-      chip.classList.add("nope");
-      if (this.nopeTimer !== null) window.clearTimeout(this.nopeTimer);
-      this.nopeTimer = window.setTimeout(() => chip.classList.remove("nope"), NOPE_SHAKE_MS);
-    }
-  }
-
   private scanFrontmost(): void {
     const session = this.session;
     if (this.closed || !session || session.phase !== "scanning") {
       return;
     }
-    this.session = scanNext(session);
+    const next = scanNext(session);
+    if (next === session) return; // nothing consumed — leave the DOM alone
+    this.session = next;
+    // One session item was consumed: the 3D belt flips its front pack and the
+    // caller (main.ts) plays the scan cue.
+    this.onItemScanned?.();
     this.render();
   }
 
@@ -267,7 +210,6 @@ export class RegisterController {
     this.nameEl.textContent = customer.name;
     this.tenderEl.textContent = `${customer.name} pays with ${tenderLabel}`;
 
-    this.renderChips();
     this.renderDisplay();
     this.renderChangePad();
     this.renderHint();
@@ -298,21 +240,6 @@ export class RegisterController {
     }
   }
 
-  private renderChips(): void {
-    const session = this.session;
-    if (!session) return;
-    const chips = this.conveyorEl.children;
-    for (let i = 0; i < chips.length; i++) {
-      const chip = chips[i] as HTMLButtonElement;
-      const scanned = i < session.scanned;
-      chip.classList.toggle("scanned", scanned);
-      chip.classList.toggle(
-        "next",
-        session.phase === "scanning" && i === session.scanned,
-      );
-    }
-  }
-
   private renderDisplay(): void {
     const session = this.session;
     const customer = this.customer;
@@ -322,10 +249,10 @@ export class RegisterController {
 
     if (s.phase === "scanning") {
       this.lcdMainEl.textContent = `TOTAL ${formatRinggit(s.totalSen)}`;
-      this.lcdSubEl.textContent =
-        s.scanned === 0
-          ? "Waiting for the first item…"
-          : `✓ ${s.items[s.scanned - 1].name} — ${s.scanned}/${itemCount}`;
+      const lastItem = s.scanned > 0 ? s.items[s.scanned - 1] : null;
+      this.lcdSubEl.textContent = lastItem
+        ? `✓ ${lastItem.name} — ${formatRinggit(lastItem.priceSen)} · ${s.scanned}/${itemCount}`
+        : "Waiting for the first item…";
       this.lcdGivenEl.hidden = true;
       this.tooMuchEl.hidden = true;
       return;
@@ -428,10 +355,6 @@ export class RegisterController {
     if (this.finishTimer !== null) {
       window.clearTimeout(this.finishTimer);
       this.finishTimer = null;
-    }
-    if (this.nopeTimer !== null) {
-      window.clearTimeout(this.nopeTimer);
-      this.nopeTimer = null;
     }
   }
 }
