@@ -19,6 +19,13 @@ import type { Customer } from "../customers/generate";
 // synchronously and animate() reads this on the first frame.
 const MAX_FRAME_DELTA_S = 0.05;
 
+// Hover tint written into the hovered instance's instanceColor slot and the
+// write-back value used on unhover (identity — meshes with no instanceColor
+// render base white anyway). Shared, never mutated: InstancedMesh.setColorAt
+// copies the values into the InstancedBufferAttribute.
+const HOVER_TINT = new THREE.Color(1.35, 1.25, 1.12);
+const INSTANCE_BASE_COLOR = new THREE.Color(1, 1, 1);
+
 const loading = createLoadingOverlay();
 
 if (WebGLCheck.assert()) {
@@ -88,10 +95,12 @@ function boot(): void {
 
   // -------------------------------------------------------------------------
   // Hover tooltip + crosshair (Task 3). A center-screen raycast shows a
-  // name + price pill within 2.2 m of a shelf product, and swaps the hovered
-  // mesh's materials for clones with a warm emissive lift. Shelf clones SHARE
-  // materials with their archetypes, so shared materials are never mutated —
-  // the original material reference(s) are restored on unhover.
+  // name + price pill within 2.2 m of a shelf product and brightens the
+  // hovered instance via instanceColor — a warm tint written to one slot and
+  // cleared back to white on unhover. Instanced product meshes SHARE materials
+  // with their archetypes, so shared materials are never mutated; the old
+  // material-swap path survives only as a defensive fallback for non-instanced
+  // meshes, cloning materials and restoring the originals on unhover.
   // -------------------------------------------------------------------------
   const crosshairEl = document.getElementById("crosshair");
   const tooltipEl = document.getElementById("item-tooltip");
@@ -163,13 +172,18 @@ function boot(): void {
     setTooltipVisible(false);
   };
 
-  // Single-slot memo: at most one hovered mesh carries cloned materials at a
-  // time. Originals are kept by reference and restored exactly; clones are
-  // disposed on unlift (they share textures — textures are NOT disposed).
+  // Single-slot memo: at most one highlight is live at a time. Instanced
+  // hits restore via instanceColor (slot written back to white); the old
+  // material-swap path stays for non-instanced meshes (defensive — the
+  // store build only spawns InstancedMesh product meshes today). Instanced
+  // path shares the archetype's materials, so they are never cloned/mutated.
   const HOVER_EMISSIVE = "#3a2a00";
   interface HoverLift {
     mesh: THREE.Mesh;
-    original: THREE.Material | THREE.Material[];
+    // Set when the lift went through instanceColor; original/clones stay null.
+    instanceId: number | null;
+    // Material-swap fallback state; null when the lift went through instanceColor.
+    original: THREE.Material | THREE.Material[] | null;
     clones: THREE.Material[];
   }
   let hoverLift: HoverLift | null = null;
@@ -184,25 +198,64 @@ function boot(): void {
 
   const unliftHovered = (): void => {
     if (!hoverLift) return;
-    hoverLift.mesh.material = hoverLift.original;
-    for (const clone of hoverLift.clones) clone.dispose();
+    const { mesh, instanceId, original, clones } = hoverLift;
+    if (instanceId !== null && (mesh as THREE.InstancedMesh).isInstancedMesh) {
+      const instanced = mesh as THREE.InstancedMesh;
+      // instanceColor exists by now (set at lift time); guard for the
+      // "lifted before any setColorAt" edge anyway.
+      if (instanced.instanceColor) {
+        instanced.setColorAt(instanceId, INSTANCE_BASE_COLOR);
+        instanced.instanceColor.needsUpdate = true;
+      }
+    } else if (original !== null) {
+      mesh.material = original;
+      for (const clone of clones) clone.dispose();
+    }
     hoverLift = null;
   };
 
-  const liftHovered = (mesh: THREE.Mesh): void => {
-    if (hoverLift?.mesh === mesh) return;
+  const liftHovered = (mesh: THREE.Mesh, instanceId?: number): void => {
+    const instanced = (mesh as THREE.InstancedMesh).isInstancedMesh
+      ? (mesh as THREE.InstancedMesh)
+      : null;
+    const slot =
+      instanced &&
+      typeof instanceId === "number" &&
+      Number.isInteger(instanceId) &&
+      instanceId >= 0 &&
+      instanceId < instanced.count
+        ? instanceId
+        : null;
+    if (instanced) {
+      if (slot === null) {
+        // Missing/out-of-range instanceId — clear any prior lift; never
+        // fall through to the swap path (materials are shared by the bake).
+        unliftHovered();
+        return;
+      }
+      if (hoverLift?.mesh === mesh && hoverLift.instanceId === slot) return;
+      unliftHovered();
+      instanced.setColorAt(slot, HOVER_TINT);
+      if (instanced.instanceColor) {
+        instanced.instanceColor.needsUpdate = true;
+      }
+      hoverLift = { mesh, instanceId: slot, original: null, clones: [] };
+      return;
+    }
+    if (hoverLift?.mesh === mesh && hoverLift.instanceId === null) return;
     unliftHovered();
+    // Defensive fallback: non-instanced mesh — old material-swap path.
     const original = mesh.material;
     if (Array.isArray(original)) {
       // Every face glows slightly — boxes/tins use shared material arrays.
       const clones = original.map(liftOne);
       mesh.material = clones;
-      hoverLift = { mesh, original, clones };
+      hoverLift = { mesh, instanceId: null, original, clones };
       return;
     }
     const clone = liftOne(original);
     mesh.material = clone;
-    hoverLift = { mesh, original, clones: [clone] };
+    hoverLift = { mesh, instanceId: null, original, clones: [clone] };
   };
 
   const hideHover = (): void => {
@@ -227,7 +280,11 @@ function boot(): void {
   const collectHoverCandidates = (): void => {
     const candidates: THREE.Mesh[] = [];
     scene.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) candidates.push(obj as THREE.Mesh);
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      // Rail tag planes are zero-thickness prints; excluded from the hover ray so packs behind them remain hoverable.
+      if (mesh.userData?.isRailTag === true) return;
+      candidates.push(mesh);
     });
     hoverCandidates = candidates;
   };
@@ -262,7 +319,7 @@ function boot(): void {
     const productId = hit ? productIdOf(hit.object) : null;
     if (hit && mesh?.isMesh && productId) {
       showTooltip(productId);
-      liftHovered(mesh);
+      liftHovered(mesh, hit.instanceId);
     } else {
       hideHover();
     }
