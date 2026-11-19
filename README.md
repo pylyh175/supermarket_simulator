@@ -11,6 +11,7 @@ Cozy first-person Malaysian supermarket simulation for the browser — single-pl
 - Mouse — look (click the canvas to lock the pointer)
 - Aim the center crosshair at a shelf item (within ~2.2 m) to see its name and price.
 - E / Space — interact; at the till, open the register / scan the front item
+- At the till: watch the belt, press E when the front pack reaches the scanner — it is bagged automatically.
 - Esc — exit pointer lock · close the till overlay (abandons the sale)
 
 ## Save
