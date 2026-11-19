@@ -9,7 +9,7 @@ Cozy first-person Malaysian supermarket simulation for the browser — single-pl
 ## Controls
 - WASD / arrows — walk
 - Mouse — look (click the canvas to lock the pointer)
-- Aim at a shelf item to see its name and price.
+- Aim the center crosshair at a shelf item (within ~2.2 m) to see its name and price.
 - E / Space — interact; at the till, open the register / scan the front item
 - Esc — exit pointer lock · close the till overlay (abandons the sale)
 
@@ -17,4 +17,4 @@ Cozy first-person Malaysian supermarket simulation for the browser — single-pl
 Till money persists in localStorage under `supermarket-sim-save` (`{ version: 1, moneySen }`, integer sen). Clear site data to reset.
 
 ## Docs
-Assets & licenses: ATTRIBUTION.md · Spec: docs/superpowers/specs/2026-11-18-supermarket-sim-design.md · Plan: docs/superpowers/plans/2026-11-18-phase1-3d-register-slice.md
+Assets & licenses: ATTRIBUTION.md · Spec: docs/superpowers/specs/2026-11-18-supermarket-sim-design.md · Plan: docs/superpowers/plans/2026-11-19-packed-shelves-planogram.md
