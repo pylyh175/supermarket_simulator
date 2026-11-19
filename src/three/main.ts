@@ -11,6 +11,7 @@ import { TillStation } from "../game/TillStation";
 import { RegisterController } from "../ui/RegisterController";
 import { formatRinggit } from "../register/money";
 import { loadGame, saveGame } from "../state/save";
+import { resolveTooltip, TOOLTIP_MAX_DISTANCE_M } from "../game/hover";
 import type { Customer } from "../customers/generate";
 
 // Clamp the per-frame delta (≤ 50 ms) so a tab-switch resume can't tunnel
@@ -85,6 +86,188 @@ function boot(): void {
   // Filled once the asset bundle resolves (customers come from the bundle).
   let customers: Customers3D | null = null;
 
+  // -------------------------------------------------------------------------
+  // Hover tooltip + crosshair (Task 3). A center-screen raycast shows a
+  // name + price pill within 2.2 m of a shelf product, and swaps the hovered
+  // mesh's materials for clones with a warm emissive lift. Shelf clones SHARE
+  // materials with their archetypes, so shared materials are never mutated —
+  // the original material reference(s) are restored on unhover.
+  // -------------------------------------------------------------------------
+  const crosshairEl = document.getElementById("crosshair");
+  const tooltipEl = document.getElementById("item-tooltip");
+  const tooltipTitleEl =
+    tooltipEl?.querySelector<HTMLDivElement>(".tip-title") ?? null;
+  const tooltipPriceEl =
+    tooltipEl?.querySelector<HTMLDivElement>(".tip-price") ?? null;
+
+  // Reused query state — no per-frame allocation beyond three's own hit list.
+  const hoverRaycaster = new THREE.Raycaster();
+  hoverRaycaster.far = TOOLTIP_MAX_DISTANCE_M;
+  const raycastCenter = new THREE.Vector2(0, 0);
+  // Snapshot of every mesh in the scene, rebuilt on every customer
+  // spawn/despawn (see syncHoverCandidates) — products arrive after the first
+  // build, and despawned avatars must not ghost as invisible occluders.
+  // Product meshes win via their productId ancestor; every other mesh acts
+  // as an occluder, so looking through a shelf at a far-side product shows
+  // nothing.
+  let hoverCandidates: THREE.Mesh[] = [];
+  // Undefined = nothing cached; forces a re-resolve after a hide so a
+  // re-hover of the same product rewrites the pill exactly once.
+  let lastTooltipId: string | undefined;
+
+  const setCrosshairHidden = (hidden: boolean): void => {
+    if (crosshairEl) crosshairEl.hidden = hidden;
+  };
+
+  // Crosshair dot visibility: always visible while pointer-locked, and only
+  // while the till overlay is closed. Recomputed from pointerlockchange and
+  // from the till open/close paths (which keep their own explicit hide/show
+  // calls — this composes with them). main owns this listener; FpsController
+  // only requests/releases the lock.
+  const registerUiEl = document.getElementById("register-ui");
+  const updateCrosshairVisibility = (): void => {
+    const tillOpen = registerUiEl ? !registerUiEl.hidden : false;
+    setCrosshairHidden(document.pointerLockElement == null || tillOpen);
+  };
+  document.addEventListener("pointerlockchange", updateCrosshairVisibility);
+  // Initial state — not locked at boot, so the dot starts hidden.
+  updateCrosshairVisibility();
+
+  // Mirror of the element's visibility — lets repeat calls no-op.
+  let tooltipVisible = false;
+  const setTooltipVisible = (visible: boolean): void => {
+    if (!tooltipEl || tooltipVisible === visible) return;
+    tooltipVisible = visible;
+    tooltipEl.hidden = !visible;
+    tooltipEl.setAttribute("aria-hidden", visible ? "false" : "true");
+  };
+
+  const showTooltip = (productId: string): void => {
+    if (productId !== lastTooltipId) {
+      const resolved = resolveTooltip(productId);
+      if (!resolved) {
+        // Unknown id — hide rather than show an empty pill.
+        lastTooltipId = undefined;
+        setTooltipVisible(false);
+        return;
+      }
+      if (tooltipTitleEl) tooltipTitleEl.textContent = resolved.title;
+      if (tooltipPriceEl) tooltipPriceEl.textContent = resolved.price;
+      lastTooltipId = productId;
+    }
+    setTooltipVisible(true);
+  };
+
+  const hideTooltip = (): void => {
+    lastTooltipId = undefined;
+    setTooltipVisible(false);
+  };
+
+  // Single-slot memo: at most one hovered mesh carries cloned materials at a
+  // time. Originals are kept by reference and restored exactly; clones are
+  // disposed on unlift (they share textures — textures are NOT disposed).
+  const HOVER_EMISSIVE = "#3a2a00";
+  interface HoverLift {
+    mesh: THREE.Mesh;
+    original: THREE.Material | THREE.Material[];
+    clones: THREE.Material[];
+  }
+  let hoverLift: HoverLift | null = null;
+
+  const liftOne = (material: THREE.Material): THREE.Material => {
+    const clone = material.clone();
+    // Lambert/Standard all have emissive; Basic doesn't — lift only a glow.
+    const emissive = (clone as THREE.MeshStandardMaterial).emissive;
+    if (emissive) emissive.set(HOVER_EMISSIVE);
+    return clone;
+  };
+
+  const unliftHovered = (): void => {
+    if (!hoverLift) return;
+    hoverLift.mesh.material = hoverLift.original;
+    for (const clone of hoverLift.clones) clone.dispose();
+    hoverLift = null;
+  };
+
+  const liftHovered = (mesh: THREE.Mesh): void => {
+    if (hoverLift?.mesh === mesh) return;
+    unliftHovered();
+    const original = mesh.material;
+    if (Array.isArray(original)) {
+      // Every face glows slightly — boxes/tins use shared material arrays.
+      const clones = original.map(liftOne);
+      mesh.material = clones;
+      hoverLift = { mesh, original, clones };
+      return;
+    }
+    const clone = liftOne(original);
+    mesh.material = clone;
+    hoverLift = { mesh, original, clones: [clone] };
+  };
+
+  const hideHover = (): void => {
+    hideTooltip();
+    unliftHovered();
+  };
+
+  // Nearest mesh at or below this distance with an ancestor carrying
+  // userData.productId shows the tooltip; anything else hides it.
+  const productIdOf = (obj: THREE.Object3D): string | null => {
+    let cur: THREE.Object3D | null = obj;
+    while (cur) {
+      const id: unknown = cur.userData?.productId;
+      if (typeof id === "string" && id.length > 0) return id;
+      cur = cur.parent;
+    }
+    return null;
+  };
+
+  // One traverse per call. Run at boot (after the store + first customer
+  // exist) and again on every customer spawn/despawn via syncHoverCandidates.
+  const collectHoverCandidates = (): void => {
+    const candidates: THREE.Mesh[] = [];
+    scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) candidates.push(obj as THREE.Mesh);
+    });
+    hoverCandidates = candidates;
+  };
+
+  // Customers spawn/despawn dynamically: despawn() removes the old group from
+  // the scene and immediately spawns the next one, all inside
+  // customers3d.update(). Rebuilding on any change of the active-customer
+  // reference (one per lifecycle) keeps the snapshot accurate — a per-frame
+  // reference compare is free, the traverse only runs on an actual change.
+  let lastHoverCustomer: Customer | null = null;
+  const syncHoverCandidates = (): void => {
+    const current = customers?.getActiveCustomer() ?? null;
+    if (current === lastHoverCustomer) return;
+    lastHoverCustomer = current;
+    collectHoverCandidates();
+  };
+
+  const updateHover = (): void => {
+    if (playerFrozen) {
+      hideHover();
+      return;
+    }
+    hoverRaycaster.setFromCamera(raycastCenter, camera);
+    // Flat list — recursive=false; hits are meshes themselves, no duplicates,
+    // and three sorts them nearest-first, so hits[0] is the closest mesh.
+    const hits = hoverRaycaster.intersectObjects(hoverCandidates, false);
+    const hit =
+      hits.length > 0 && hits[0].distance <= TOOLTIP_MAX_DISTANCE_M
+        ? hits[0]
+        : undefined;
+    const mesh = hit?.object as THREE.Mesh | undefined;
+    const productId = hit ? productIdOf(hit.object) : null;
+    if (hit && mesh?.isMesh && productId) {
+      showTooltip(productId);
+      liftHovered(mesh);
+    } else {
+      hideHover();
+    }
+  };
+
   // Plain-DOM register overlay (Task 7). The 2D Phaser scene is gone; the
   // controller renders straight into index.html's #register-ui skeleton.
   const registerController = new RegisterController();
@@ -112,6 +295,13 @@ function boot(): void {
     const served = tillCustomer;
     tillCustomer = null;
     setLabelsHidden(false);
+    setCrosshairHidden(false);
+    // Compose with the lock state: the re-lock below is async, so the dot
+    // stays hidden until pointerlockchange fires (or stays hidden + the
+    // lock hint shows if Chrome refuses the re-lock).
+    updateCrosshairVisibility();
+    // Any half-hover state from before the till opened must not survive it.
+    hideHover();
     // Post-close pointer-lock hint: Chrome's ~1.25 s post-Esc cooldown (or
     // the thank-you timer path) often rejects the immediate re-lock, leaving
     // a dead mouse with no explanation. Show a transient pill for ~3 s; FpsController's
@@ -150,7 +340,12 @@ function boot(): void {
     if (document.pointerLockElement) document.exitPointerLock();
     tillCustomer = customer;
     setLabelsHidden(true);
+    setCrosshairHidden(true);
+    hideHover();
     registerController.open(customer);
+    // Register-ui is up now — keep the dot hidden (it stays hidden even if
+    // the lock exit hasn't landed yet).
+    updateCrosshairVisibility();
     event.preventDefault();
   });
 
@@ -175,6 +370,10 @@ function boot(): void {
       } catch (error) {
         console.error("[main] Customer setup failed — no customers will spawn.", error);
       }
+      // Hover snapshot — after the store (and first customer) exist. Seed
+      // the tracker so the first animate() frame doesn't re-traverse.
+      collectHoverCandidates();
+      lastHoverCustomer = customers?.getActiveCustomer() ?? null;
       hideLoading(loading);
     })
     .catch(() => hideLoading(loading));
@@ -187,8 +386,13 @@ function boot(): void {
     // dead — pointer lock was exited). The camera still tracks the spot.
     if (!playerFrozen) player.update(dt);
     customers?.update(dt);
+    // Customers add/remove meshes inside update() — rebuild the hover
+    // snapshot if the active customer changed this frame.
+    syncHoverCandidates();
     camera.position.set(player.position().x, eyeHeightM(), player.position().z);
     camera.rotation.set(player.pitch(), player.yaw(), 0); // order stays YXZ
+    // Raycast after the camera transform is final so hits match the render.
+    updateHover();
     renderer.render(scene, camera);
   };
   animate();

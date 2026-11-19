@@ -1,6 +1,5 @@
 # Supermarket Simulator
 Cozy first-person Malaysian supermarket simulation for the browser — single-player, Three.js + TypeScript.
-
 ## Run
 - `npm install`
 - `npm run dev` — start the dev server (Vite prints the local URL)
@@ -10,6 +9,7 @@ Cozy first-person Malaysian supermarket simulation for the browser — single-pl
 ## Controls
 - WASD / arrows — walk
 - Mouse — look (click the canvas to lock the pointer)
+- Aim at a shelf item to see its name and price.
 - E / Space — interact; at the till, open the register / scan the front item
 - Esc — exit pointer lock · close the till overlay (abandons the sale)
 
