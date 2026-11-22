@@ -81,10 +81,10 @@ function boot(): void {
   // Base pixel size of the machine-screen DOM element (matches
   // createMachineScreenDOM in cashierMachine.ts). main.ts scales it to the
   // projected size of the 3D screen face each frame.
-  const MACHINE_SCREEN_BASE_W = 160; // matches POLE_SCREEN_W_M (0.16 m)
-  const MACHINE_SCREEN_BASE_H = 100; // matches POLE_SCREEN_H_M (0.10 m)
+  const MACHINE_SCREEN_BASE_W = 200; // matches createMachineScreenDOM (200 px)
+  const MACHINE_SCREEN_BASE_H = 130; // matches createMachineScreenDOM (130 px)
   // Half-extents of the 3D screen face (metres) — see cashierMachine.ts.
-  const MACHINE_SCREEN_HALF_H_M = 0.05; // POLE_SCREEN_H_M / 2
+  const MACHINE_SCREEN_HALF_H_M = 0.065; // POLE_SCREEN_H_M / 2
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -159,15 +159,11 @@ function boot(): void {
     if (crosshairEl) crosshairEl.hidden = hidden;
   };
 
-  // Crosshair dot visibility: always visible while pointer-locked, and only
-  // while the till overlay is closed. Recomputed from pointerlockchange and
-  // from the till open/close paths (which keep their own explicit hide/show
-  // calls — this composes with them). main owns this listener; FpsController
-  // only requests/releases the lock.
-  const registerUiEl = document.getElementById("register-ui");
+  // Crosshair dot visibility: visible while pointer-locked. During a sale the
+  // pointer lock is released (the player is frozen at the register), so the dot
+  // hides automatically; the till open/close paths also call this explicitly.
   const updateCrosshairVisibility = (): void => {
-    const tillOpen = registerUiEl ? !registerUiEl.hidden : false;
-    setCrosshairHidden(document.pointerLockElement == null || tillOpen);
+    setCrosshairHidden(document.pointerLockElement == null);
   };
   document.addEventListener("pointerlockchange", updateCrosshairVisibility);
   // Initial state — not locked at boot, so the dot starts hidden.
@@ -395,24 +391,38 @@ function boot(): void {
     if (playerFrozen) return; // only when NOT in a sale
     if (event.code !== "KeyE" && event.code !== "Space") return;
     if (!tillStation.isPlayerInside(player.position())) return;
-    if (!customers) return;
+    // The machine must exist before the player is frozen — otherwise the sale
+    // could never be started or closed (a permanent freeze).
+    if (!cashierMachine || !customers) return;
     const customer = customers.getActiveCustomer();
     if (!customer) return;
     if (!customers.beginService()) return;
+
+    // This keypress is the user gesture that unlocks WebAudio, and the sale
+    // starts the customer's placement tosses.
+    primeAudio();
+    try {
+      checkoutFlow?.begin(customer);
+      cashierMachine.begin(
+        customer,
+        customers.getActiveCustomerAvatar() ?? undefined,
+      );
+    } catch (error) {
+      // Never leave the player frozen in a half-started sale.
+      console.error("[main] Could not open the till — sale rolled back.", error);
+      checkoutFlow?.abandon();
+      customers.completeService();
+      return;
+    }
+
     playerFrozen = true;
     if (document.pointerLockElement) document.exitPointerLock();
     tillCustomer = customer;
     setLabelsHidden(true);
     setCrosshairHidden(true);
     hideHover();
-    // This keypress is the user gesture that unlocks WebAudio, and the sale
-    // starts the customer's placement tosses.
-    primeAudio();
-    checkoutFlow?.begin(customer);
-    const customerAvatar = customers?.getActiveCustomerAvatar?.() ?? undefined;
-    cashierMachine?.begin(customer, customerAvatar);
-    // Register-ui is up now — keep the dot hidden (it stays hidden even if
-    // the lock exit hasn't landed yet).
+    // Keep the dot hidden (it stays hidden even if the lock exit hasn't
+    // landed yet).
     updateCrosshairVisibility();
     event.preventDefault();
   });
@@ -421,31 +431,36 @@ function boot(): void {
   // F = scan item, G = give change, D = toggle drawer, Esc = abandon.
   window.addEventListener("keydown", (event) => {
     if (!playerFrozen) return;
+    const machine = cashierMachine;
+    if (!machine) return;
 
     if (event.code === "Escape") {
       event.preventDefault();
-      cashierMachine!.abandon(); // triggers onComplete with completed=false
+      machine.abandon(); // triggers onComplete with completed=false
       return;
     }
 
-    if (event.code === "KeyF" && cashierMachine!.canScan()) {
-      // Scan item at scanner gun
+    if (event.code === "KeyF") {
       event.preventDefault();
-      cashierMachine!.onItemScanned();
-      playBeep();
+      if (machine.canScan()) {
+        machine.onItemScanned();
+        playBeep();
+      } else {
+        machine.onScanBlocked();
+      }
       return;
     }
 
     if (event.code === "KeyG") {
       // Give change — pick the suggested denomination and hand it over
       event.preventDefault();
-      const remaining = cashierMachine!.getRemainingChange?.();
+      const remaining = machine.getRemainingChange();
       if (remaining && remaining > 0) {
         // Suggest the largest denomination that fits
         const denoms = [10000, 5000, 2000, 1000, 500, 100, 50, 20, 10, 5];
         for (const d of denoms) {
           if (d <= remaining) {
-            cashierMachine!.onChangeGiven(d);
+            machine.onChangeGiven(d);
             break;
           }
         }
@@ -456,7 +471,7 @@ function boot(): void {
     if (event.code === "KeyD") {
       // Toggle cash drawer
       event.preventDefault();
-      cashierMachine!.toggleDrawer();
+      machine.toggleDrawer();
       return;
     }
   });
@@ -464,6 +479,8 @@ function boot(): void {
   // Mouse click for keypad and drawer handle (when pointer unlocked, i.e., till open)
   renderer.domElement.addEventListener("click", (event) => {
     if (!playerFrozen) return;
+    const machine = cashierMachine;
+    if (!machine) return;
     // We need pointer lock released for mouse clicks to work on CSS2D/raycast
     if (document.pointerLockElement) return;
 
@@ -477,19 +494,19 @@ function boot(): void {
     raycaster.setFromCamera(mouse, camera);
 
     // Check drawer handle first
-    const drawerHandle = cashierMachine!.getDrawerHandle();
+    const drawerHandle = machine.getDrawerHandle();
     const handleHits = raycaster.intersectObject(drawerHandle, true);
     if (handleHits.length > 0) {
-      cashierMachine!.toggleDrawer();
+      machine.toggleDrawer();
       return;
     }
 
     // Check keypad buttons
-    const keyMeshes = cashierMachine!.getKeyMeshes();
+    const keyMeshes = machine.getKeyMeshes();
     for (const [denom, mesh] of keyMeshes) {
       const hits = raycaster.intersectObject(mesh, true);
       if (hits.length > 0) {
-        cashierMachine!.onChangeGiven(denom);
+        machine.onChangeGiven(denom);
         return;
       }
     }
@@ -535,7 +552,7 @@ function boot(): void {
           canScan: () => checkoutFlow?.canScan() ?? true,
           onItemScanned: () => checkoutFlow?.onItemScanned(),
           abandon: () => checkoutFlow?.abandon(),
-          update: (dt: number) => checkoutFlow?.update(dt),
+          isActive: () => checkoutFlow?.isActive() ?? false,
         });
 
         // Cashier machine completion handler — register AFTER machine exists

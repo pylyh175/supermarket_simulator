@@ -22,10 +22,10 @@ const SCREEN_THICKNESS_M = 0.018;
 const SCREEN_BOTTOM_ABOVE_BODY_M = 0.02;
 
 // New small register display on pole (right side, like real supermarket registers)
-const POLE_HEIGHT_M = 0.35;         // pole extends up from machine top
+const POLE_HEIGHT_M = 0.14;         // short pole: screen lands near eye level
 const POLE_RADIUS_M = 0.015;        // thin pole
-const POLE_SCREEN_W_M = 0.16;       // 16 cm wide
-const POLE_SCREEN_H_M = 0.10;       // 10 cm tall
+const POLE_SCREEN_W_M = 0.20;       // 20 cm wide
+const POLE_SCREEN_H_M = 0.13;       // 13 cm tall
 const POLE_SCREEN_THICK_M = 0.012;  // thin panel
 const POLE_SCREEN_ABOVE_POLE_M = 0.02; // gap between pole top and screen bottom
 
@@ -445,24 +445,24 @@ function createMachineScreenDOM(): HTMLElement {
   const root = document.createElement("div");
   root.className = "machine-screen";
   root.style.cssText = `
-    width: 320px; height: 280px;
+    width: 200px; height: 130px;
     background: #1a1610;
-    border: 3px solid #caa46a;
-    border-radius: 8px;
+    border: 2px solid #caa46a;
+    border-radius: 5px;
     font-family: system-ui, "Segoe UI", "Trebuchet MS", sans-serif;
     color: #e8dcc8;
     display: flex; flex-direction: column;
-    padding: 12px; box-sizing: border-box;
+    padding: 6px; box-sizing: border-box;
     overflow: hidden;
   `;
   root.innerHTML = `
-    <div class="screen-header" style="font-size: 11px; font-weight: 800; letter-spacing: 0.15em; color: #caa46a; margin-bottom: 8px; text-transform: uppercase;">KEDAI RUNCIT</div>
-    <div class="screen-total" style="font-size: 42px; font-weight: 800; font-family: ui-monospace, monospace; text-align: right; color: #ffeb3b; margin-bottom: 6px; line-height: 1;">RM0.00</div>
-    <div class="screen-sub" style="font-size: 13px; color: #a89a7c; min-height: 1.4em; margin-bottom: 10px;">Waiting for items…</div>
-    <div class="screen-items" style="flex: 1; overflow-y: auto; font-size: 12px; line-height: 1.6; color: #c8b898;"></div>
-    <div class="screen-payment" style="font-size: 14px; font-weight: 700; color: #ffeb3b; text-align: center; min-height: 1.5em;"></div>
-    <div class="screen-change" style="font-size: 13px; color: #8ab87c; text-align: center; min-height: 1.4em;"></div>
-    <div class="screen-hint" style="font-size: 11px; color: #caa46a; text-align: center; min-height: 1.2em;"></div>
+    <div class="screen-header" style="font-size: 7px; font-weight: 800; letter-spacing: 0.12em; color: #caa46a; margin-bottom: 3px; text-transform: uppercase;">KEDAI RUNCIT</div>
+    <div class="screen-total" style="font-size: 26px; font-weight: 800; font-family: ui-monospace, monospace; text-align: right; color: #ffeb3b; margin-bottom: 2px; line-height: 1;">RM0.00</div>
+    <div class="screen-sub" style="font-size: 8px; color: #a89a7c; min-height: 1.35em; margin-bottom: 4px;">Waiting for items…</div>
+    <div class="screen-items" style="flex: 1; overflow-y: auto; font-size: 7.5px; line-height: 1.35; color: #c8b898;"></div>
+    <div class="screen-payment" style="font-size: 9px; font-weight: 700; color: #ffeb3b; text-align: center; min-height: 1.4em;"></div>
+    <div class="screen-change" style="font-size: 8px; color: #8ab87c; text-align: center; min-height: 1.3em;"></div>
+    <div class="screen-hint" style="font-size: 7.5px; color: #caa46a; text-align: center; min-height: 1.2em;"></div>
   `;
   return root;
 }
@@ -482,6 +482,8 @@ export interface CashierMachine {
   canScan(): boolean;
   /** Called when player scans an item at the machine. */
   onItemScanned(): void;
+  /** Called when F is pressed but no pack is at the scanner yet (feedback). */
+  onScanBlocked(): void;
   /** Called when player receives cash from customer. */
   onCashReceived(): void;
   /** Called when player gives change (denomination in sen). */
@@ -553,7 +555,12 @@ function formatSen(sen: number): string {
 export function createCashierMachine(
   scene: THREE.Scene,
   props: ReturnType<typeof buildCashierMachineProps>,
-  checkoutFlow: { canScan: () => boolean; onItemScanned: () => void; abandon: () => void; update: (dt: number) => void },
+  checkoutFlow: {
+    canScan: () => boolean;
+    onItemScanned: () => void;
+    abandon: () => void;
+    isActive: () => boolean;
+  },
 ): CashierMachine {
   let completeHandler: ((completed: boolean, customer: Customer | null) => void) | null = null;
   const THANK_YOU_MS = 1000;
@@ -643,7 +650,7 @@ export function createCashierMachine(
 
       paymentEl.textContent = "";
       changeEl.textContent = "";
-      hintEl.textContent = "";
+      hintEl.textContent = "F = scan · Esc = cancel";
     } else if (s.phase === "payment") {
       subEl.textContent = `${s.customer.name} is paying…`;
       paymentEl.textContent = `Received: ${formatSen(s.tenderedSen ?? 0)}`;
@@ -658,7 +665,7 @@ export function createCashierMachine(
         // Suggest next denomination
         for (const d of DENOMS_SEN) {
           if (d <= remaining) {
-            hintEl.textContent = `Suggested: ${DENOM_LABELS[d]}`;
+            hintEl.textContent = `Suggested: ${DENOM_LABELS[d]} · G = give · D = drawer`;
             break;
           }
         }
@@ -710,7 +717,8 @@ export function createCashierMachine(
   return {
     update(dt: number) {
       if (!active) return;
-      checkoutFlow.update?.(dt); // delegate belt movement
+      // The belt is advanced by main.ts's animate loop (single owner). Do not
+      // advance it here too — that ran the belt at double speed.
       updateDrawer(dt);
       updateLaser(dt);
       updatePrinter(dt);
@@ -733,7 +741,10 @@ export function createCashierMachine(
     },
 
     begin(customer: Customer, customerAvatar?: CustomerAvatar) {
-      checkoutFlow.abandon();
+      // NOTE: do not touch the CheckoutFlow here. main.ts starts it with
+      // checkoutFlow.begin(customer) immediately before this call; abandoning
+      // it here left the belt inactive, so canScan() was false forever and F
+      // could never scan. The flow owns its own reset in begin().
       if (thankYouTimer) {
         clearTimeout(thankYouTimer);
         thankYouTimer = null;
@@ -762,7 +773,12 @@ export function createCashierMachine(
     },
 
     canScan() {
-      return active && session?.phase === "scanning" && checkoutFlow.canScan();
+      if (!active || session?.phase !== "scanning") return false;
+      // The belt pipeline gates scans so an item is always at the scanner.
+      // If the flow is missing or inactive (setup failure, or a future
+      // regression), fall back to the session gate instead of dead-ending the
+      // sale: the player can still scan and finish the transaction.
+      return checkoutFlow.isActive() ? checkoutFlow.canScan() : true;
     },
 
     onItemScanned() {
@@ -807,6 +823,13 @@ export function createCashierMachine(
       laserGeometry.attributes.position.needsUpdate = true;
 
       renderScreen();
+    },
+
+    onScanBlocked() {
+      if (!active || !session || session.phase !== "scanning") return;
+      // The belt gates the scan so the pack is at the scanner when it counts.
+      // Tell the player why F did nothing instead of leaving the screen static.
+      hintEl.textContent = "Item not at scanner yet…";
     },
 
     onCashReceived() {
