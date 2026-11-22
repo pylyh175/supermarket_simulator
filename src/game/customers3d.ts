@@ -49,6 +49,13 @@ export interface CustomerAvatar {
   readonly label: HTMLDivElement;
   /** Group y that puts feet on the floor (bobbing adds to this). */
   readonly baseY: number;
+  /** Procedural arms for handoff animations. */
+  readonly arms: {
+    left: THREE.Group;
+    right: THREE.Group;
+    leftHand: THREE.Mesh;
+    rightHand: THREE.Mesh;
+  } | null;
 }
 
 export class Customers3D {
@@ -83,6 +90,11 @@ export class Customers3D {
     return this.active?.customer ?? null;
   }
 
+  /** The customer avatar currently on the floor (with arms for handoff). */
+  getActiveCustomerAvatar(): CustomerAvatar | null {
+    return this.active ?? null;
+  }
+
   /**
    * Spawn the head of the queue at the entrance. No-op when a customer is
    * already on the floor (never two at once, never the same one twice).
@@ -115,12 +127,17 @@ export class Customers3D {
     figure.rotation.y = 0; // faces +Z — walks into the store, toward the till
     this.scene.add(figure);
 
+    // Add procedural arms for handoff animations
+    const arms = createProceduralArms(figure.scale.x);
+    figure.add(arms.left);
+    figure.add(arms.right);
+
     const label = document.createElement("div");
     label.className = "customer-label";
     label.textContent = customer.name;
     this.labelsRoot.appendChild(label);
 
-    this.active = { customer, group: figure, label, baseY };
+    this.active = { customer, group: figure, label, baseY, arms };
     this.state = "walking-in";
     this.bobPhase = 0;
     console.log(`[customers3d] ${customer.name} walks in (${customer.basket.length} items).`);
@@ -252,6 +269,141 @@ export class Customers3D {
     active.label.style.display = "block";
     active.label.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -100%)`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Procedural arms for handoff animations
+// ---------------------------------------------------------------------------
+
+const ARM_LENGTH_M = 0.35;
+const ARM_RADIUS_M = 0.025;
+const HAND_RADIUS_M = 0.03;
+
+function createProceduralArms(scale: number): {
+  left: THREE.Group;
+  right: THREE.Group;
+  leftHand: THREE.Mesh;
+  rightHand: THREE.Mesh;
+} {
+  const armMat = new THREE.MeshLambertMaterial({ color: 0xd4a574, flatShading: true });
+  const handMat = new THREE.MeshLambertMaterial({ color: 0xe8c898, flatShading: true });
+
+  const createArm = (side: number) => {
+    const group = new THREE.Group();
+    group.name = side > 0 ? "arm-right" : "arm-left";
+
+    const upperArm = new THREE.Mesh(
+      new THREE.CylinderGeometry(ARM_RADIUS_M * scale, ARM_RADIUS_M * scale, ARM_LENGTH_M * 0.6 * scale, 8),
+      armMat,
+    );
+    upperArm.position.y = -ARM_LENGTH_M * 0.3 * scale;
+    group.add(upperArm);
+
+    const lowerArm = new THREE.Mesh(
+      new THREE.CylinderGeometry(ARM_RADIUS_M * 0.9 * scale, ARM_RADIUS_M * 0.9 * scale, ARM_LENGTH_M * 0.4 * scale, 8),
+      armMat,
+    );
+    lowerArm.position.y = -ARM_LENGTH_M * 0.6 * scale - ARM_LENGTH_M * 0.2 * scale;
+    group.add(lowerArm);
+
+    const hand = new THREE.Mesh(
+      new THREE.SphereGeometry(HAND_RADIUS_M * scale, 8, 6),
+      handMat,
+    );
+    hand.position.y = -ARM_LENGTH_M * scale;
+    group.add(hand);
+
+    return { group, hand };
+  };
+
+  const left = createArm(-1);
+  const right = createArm(1);
+
+  const shoulderY = 0.7 * scale;
+  const shoulderX = 0.18 * scale;
+
+  left.group.position.set(-shoulderX, shoulderY, 0.05 * scale);
+  right.group.position.set(shoulderX, shoulderY, 0.05 * scale);
+
+  left.group.rotation.x = 0;
+  right.group.rotation.x = 0;
+
+  return {
+    left: left.group,
+    right: right.group,
+    leftHand: left.hand,
+    rightHand: right.hand,
+  };
+}
+
+/** Animate customer arms for cash handoff. */
+export function animateCustomerHandoff(
+  customer: { arms: ReturnType<typeof createProceduralArms> | null },
+  type: "give" | "receive",
+  onMidpoint?: () => void,
+): void {
+  if (!customer.arms) return;
+  const { left, right } = customer.arms;
+  const isGive = type === "give";
+
+  const duration = 0.8;
+  let elapsed = 0;
+
+  const startRightX = right.rotation.x;
+  const targetRightX = isGive ? -Math.PI / 2.5 : -Math.PI / 3;
+  const startRightZ = right.position.z;
+  const targetRightZ = isGive ? 0.15 : 0.1;
+  const startLeftX = left.rotation.x;
+
+  const animate = (dt: number): void => {
+    elapsed += dt;
+    const t = Math.min(1, elapsed / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+
+    right.rotation.x = startRightX + (targetRightX - startRightX) * eased;
+    right.position.z = startRightZ + (targetRightZ - startRightZ) * eased;
+    left.rotation.x = startLeftX * 0.3 * eased;
+
+    if (t >= 0.5 && onMidpoint) {
+      onMidpoint();
+      onMidpoint = undefined;
+    }
+
+    if (t < 1) {
+      requestAnimationFrame(() => animate(1 / 60));
+    } else {
+      setTimeout(() => {
+        returnArmsToRest(customer.arms!);
+      }, 400);
+    }
+  };
+
+  animate(0);
+}
+
+function returnArmsToRest(arms: ReturnType<typeof createProceduralArms>): void {
+  const { left, right } = arms;
+  const duration = 0.5;
+  let elapsed = 0;
+  const startLeftX = left.rotation.x;
+  const startRightX = right.rotation.x;
+  const startRightZ = right.position.z;
+
+  const animate = (dt: number): void => {
+    elapsed += dt;
+    const t = Math.min(1, elapsed / duration);
+    const eased = t * t * (3 - 2 * t);
+
+    left.rotation.x = startLeftX * (1 - eased);
+    right.rotation.x = startRightX * (1 - eased);
+    right.position.z = startRightZ * (1 - eased);
+
+    if (t < 1) {
+      requestAnimationFrame(() => animate(1 / 60));
+    }
+  };
+
+  animate(0);
 }
 
 // ---------------------------------------------------------------------------

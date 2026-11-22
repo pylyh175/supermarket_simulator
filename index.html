@@ -15,44 +15,6 @@
     <div id="lock-hint" role="status" hidden>Click the canvas to look around</div>
     <div id="crosshair" aria-hidden="true"></div>
     <div id="item-tooltip" hidden aria-hidden="true"><div class="tip-title"></div><div class="tip-price"></div></div>
-    <div id="register-ui" hidden>
-      <div class="register-panel" role="dialog" aria-label="Register">
-        <!-- Customer line -->
-        <div class="customer-line">
-          <div class="customer-avatar" id="customer-avatar" aria-hidden="true">A</div>
-          <div class="customer-text">
-            <div class="customer-name" id="customer-name">Customer</div>
-            <div class="customer-tender" id="customer-tender">Waiting patiently…</div>
-          </div>
-          <div class="customer-badge">Waiting patiently</div>
-        </div>
-
-        <!-- Register display (LCD) -->
-        <div class="register-display" id="register-display">
-          <div class="lcd-main" id="lcd-main">TOTAL RM0.00</div>
-          <div class="lcd-sub" id="lcd-sub">Waiting for items…</div>
-          <div class="lcd-given" id="lcd-given" hidden>Given so far: RM0.00</div>
-          <div class="too-much" id="too-much" hidden>Too much! Undo the extra, ya.</div>
-          <button class="hint-btn" id="hint-btn" type="button" hidden title="A little help with the change">Hint</button>
-          <div class="hint-tip" id="hint-tip" hidden></div>
-        </div>
-
-        <!-- Change pad (only in the change phase) -->
-        <div id="change-pad" class="change-pad" hidden>
-          <div class="change-pad-label">Change pad — tap denominations to give</div>
-          <div id="denom-buttons" class="denom-buttons"></div>
-          <button id="undo-btn" class="undo-btn" type="button">↺ Undo</button>
-        </div>
-
-        <!-- Thank-you banner -->
-        <div id="thankyou" class="thankyou" hidden>
-          <div class="thankyou-text">Thank you!</div>
-          <div class="thankyou-sub">Terima kasih! Come again, ya.</div>
-        </div>
-
-        <div class="register-footer">E — scan the front item &nbsp;·&nbsp; Esc — abandon sale</div>
-      </div>
-    </div>
     <script type="module" src="/src/three/main.ts"></script>
   </body>
 </html>

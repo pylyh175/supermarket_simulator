@@ -7,9 +7,11 @@ import { loadAssets } from "./assets";
 import { FpsController } from "../player/FpsController";
 import { eyeHeightM } from "../player/movement";
 import { Customers3D } from "../game/customers3d";
+import type { CustomerAvatar } from "../game/customers3d";
 import { TillStation } from "../game/TillStation";
 import { CheckoutFlow } from "./checkoutFlow";
-import { RegisterController } from "../ui/RegisterController";
+import { buildCashierMachineProps, createCashierMachine, type CashierMachine } from "./cashierMachine";
+import { TILL_X, TILL_Z } from "./storeLayout";
 import { playBeep, playPlip, primeAudio } from "../audio/cues";
 import { formatRinggit } from "../register/money";
 import { loadGame, saveGame } from "../state/save";
@@ -73,18 +75,29 @@ function boot(): void {
   );
   camera.rotation.order = "YXZ"; // yaw (Y) then pitch (X)
 
-  // Shell builds floor + walls + fog and returns the shared wall colliders.
-  // The player starts against walls-only colliders; once the asset bundle
-  // resolves, buildStore() appends the props and we swap in the merged list.
-  const shellColliders = buildStoreShell(scene);
-  const player = new FpsController(shellColliders, renderer.domElement);
-  camera.position.set(player.position().x, eyeHeightM(), player.position().z);
+  // The cashier machine's screen is a plain DOM element glued to the machine's
+// WORLD position (see updateMachineScreen below) — not a CSS2DObject — so it
+// stays on the register instead of tracking the camera.
+  // Base pixel size of the machine-screen DOM element (matches
+  // createMachineScreenDOM in cashierMachine.ts). main.ts scales it to the
+  // projected size of the 3D screen face each frame.
+  const MACHINE_SCREEN_BASE_W = 320;
+  const MACHINE_SCREEN_BASE_H = 280;
+  // Half-extents of the 3D screen face (metres) — see cashierMachine.ts.
+  const MACHINE_SCREEN_HALF_H_M = 0.14;
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
+
+  // Shell builds floor + walls + fog and returns the shared wall colliders.
+  // The player starts against walls-only colliders; once the asset bundle
+  // resolves, buildStore() appends the props and we swap in the merged list.
+  const shellColliders = buildStoreShell(scene);
+  const player = new FpsController(shellColliders, renderer.domElement);
+  camera.position.set(player.position().x, eyeHeightM(), player.position().z);
 
   // Invisible till zone on the cashier side of the counter; the E/Space
   // handler below polls it every press.
@@ -108,6 +121,8 @@ function boot(): void {
   // Belt/bag/tote props + item pipeline; built with the store bundle so the
   // hover snapshot includes the props as occluders.
   let checkoutFlow: CheckoutFlow | null = null;
+  // Cashier machine — owns screen, scanner, keypad, drawer, printer.
+  let cashierMachine: CashierMachine | null = null;
 
   // -------------------------------------------------------------------------
   // Hover tooltip + crosshair (Task 3). A center-screen raycast shows a
@@ -352,17 +367,6 @@ function boot(): void {
     }
   };
 
-  // Plain-DOM register overlay (Task 7). The 2D Phaser scene is gone; the
-  // controller renders straight into index.html's #register-ui skeleton.
-  const registerController = new RegisterController();
-  // The 3D belt owns the scan tempo and the cues; the register only asks.
-  // Before the bundle resolves (or if the belt failed to build) the gate
-  // stays open so the overlay remains usable.
-  registerController.canScan = () => checkoutFlow?.canScan() ?? true;
-  registerController.onItemScanned = () => {
-    checkoutFlow?.onItemScanned();
-    playBeep();
-  };
   // Cash-in-till, integer sen. Task 8: loaded from the save at boot before
   // the first HUD render (no RM0.00 flash), and persisted on every completed
   // sale inside creditMoney() — the one place money changes hands.
@@ -383,48 +387,10 @@ function boot(): void {
     const labels = document.getElementById("labels");
     if (labels) labels.hidden = hidden;
   };
-  registerController.onClose(({ completed }) => {
-    const served = tillCustomer;
-    tillCustomer = null;
-    setLabelsHidden(false);
-    setCrosshairHidden(false);
-    // Compose with the lock state: the re-lock below is async, so the dot
-    // stays hidden until pointerlockchange fires (or stays hidden + the
-    // lock hint shows if Chrome refuses the re-lock).
-    updateCrosshairVisibility();
-    // Any half-hover state from before the till opened must not survive it.
-    hideHover();
-    // Post-close pointer-lock hint: Chrome's ~1.25 s post-Esc cooldown (or
-    // the thank-you timer path) often rejects the immediate re-lock, leaving
-    // a dead mouse with no explanation. Show a transient pill for ~3 s; FpsController's
-    // click handler does the actual re-lock on the player's next click.
-    showLockHint();
-    // ANY close path clears the belt and hides the tote. The bag and its
-    // content persist (abandon never touches them); a completed sale has
-    // already bagged every scanned pack during the payment/thank-you beats.
-    checkoutFlow?.abandon();
-    // ANY close path (exact change, or Escape abandon) sends the customer on
-    // their way; only a completed sale credits the till.
-    customers?.completeService();
-    playerFrozen = false;
-    // Re-lock pointer inside this gesture where there is one (Escape
-    // keydown). The thank-you path closes from a timer — not a gesture —
-    // so Chrome may refuse; swallow either way. FpsController's click
-    // handler re-locks on the player's next click regardless.
-    try {
-      const result = renderer.domElement.requestPointerLock() as
-        | Promise<void>
-        | undefined;
-      result?.catch?.(() => {});
-    } catch {
-      // Pointer lock denied — re-lock happens on the next canvas click.
-    }
-    if (completed && served) creditMoney(served.basketTotalSen);
-  });
 
-  // E / Space at the till: open it for the waiting customer. Multiple
-  // presses can't double-launch because beginService() only flips from
-  // "waiting" — the second press returns false while we are "serving".
+  // Interaction state for cashier machine (laser now handled in cashierMachine)
+
+  // E / Space at the till: open it for the waiting customer.
   window.addEventListener("keydown", (event) => {
     if (event.code !== "KeyE" && event.code !== "Space") return;
     if (!tillStation.isPlayerInside(player.position())) return;
@@ -442,11 +408,64 @@ function boot(): void {
     // starts the customer's placement tosses.
     primeAudio();
     checkoutFlow?.begin(customer);
-    registerController.open(customer);
+    const customerAvatar = customers?.getActiveCustomerAvatar?.() ?? undefined;
+    cashierMachine?.begin(customer, customerAvatar);
     // Register-ui is up now — keep the dot hidden (it stays hidden even if
     // the lock exit hasn't landed yet).
     updateCrosshairVisibility();
     event.preventDefault();
+  });
+
+  // Separate keydown for Escape (abandon) and scanner/keypad/drawer interactions
+  window.addEventListener("keydown", (event) => {
+    if (!playerFrozen) return;
+
+    if (event.code === "Escape") {
+      event.preventDefault();
+      cashierMachine!.abandon(); // this will trigger onComplete with completed=false
+      return;
+    }
+
+    // Scanner: E when aiming at scanner gun
+    if (event.code === "KeyE" && cashierMachine!.canScan()) {
+      cashierMachine!.onItemScanned();
+      playBeep();
+      return;
+    }
+  });
+
+  // Mouse click for keypad and drawer handle (when pointer unlocked, i.e., till open)
+  renderer.domElement.addEventListener("click", (event) => {
+    if (!playerFrozen) return;
+    // We need pointer lock released for mouse clicks to work on CSS2D/raycast
+    if (document.pointerLockElement) return;
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+
+    // Check drawer handle first
+    const drawerHandle = cashierMachine!.getDrawerHandle();
+    const handleHits = raycaster.intersectObject(drawerHandle, true);
+    if (handleHits.length > 0) {
+      cashierMachine!.toggleDrawer();
+      return;
+    }
+
+    // Check keypad buttons
+    const keyMeshes = cashierMachine!.getKeyMeshes();
+    for (const [denom, mesh] of keyMeshes) {
+      const hits = raycaster.intersectObject(mesh, true);
+      if (hits.length > 0) {
+        cashierMachine!.onChangeGiven(denom);
+        return;
+      }
+    }
   });
 
   // Kick off the asset pipeline. The scene shell renders immediately;
@@ -473,6 +492,54 @@ function boot(): void {
         checkoutFlow = null;
         console.error("[main] Checkout flow setup failed — belt disabled.", error);
       }
+      // Cashier machine: built with the bundle so its prop is in the scene.
+      try {
+        const machineProps = buildCashierMachineProps();
+        // Position machine on counter (north of belt, centered)
+        // Counter center is at TILL_X, TILL_Z; belt is south of center.
+        // Machine sits north of belt on counter top.
+        const counterBox = new THREE.Box3().setFromObject(bundle.counter);
+        const counterSize = counterBox.getSize(new THREE.Vector3());
+        const counterCenterX = TILL_X + (counterBox.min.x + counterBox.max.x) / 2;
+        const counterCenterZ = TILL_Z + (counterBox.min.z + counterBox.max.z) / 2;
+        const topY = counterBox.max.y;
+        machineProps.group.position.set(counterCenterX, topY, counterCenterZ + 0.15); // north of belt
+        cashierMachine = createCashierMachine(scene, machineProps, {
+          canScan: () => checkoutFlow?.canScan() ?? true,
+          onItemScanned: () => checkoutFlow?.onItemScanned(),
+          abandon: () => checkoutFlow?.abandon(),
+          update: (dt: number) => checkoutFlow?.update(dt),
+        });
+
+        // Cashier machine completion handler — register AFTER machine exists
+        cashierMachine.onComplete((completed: boolean, servedCustomer: Customer | null) => {
+          setLabelsHidden(false);
+          setCrosshairHidden(false);
+          updateCrosshairVisibility();
+          hideHover();
+          showLockHint();
+          checkoutFlow?.abandon();
+          customers?.completeService();
+          playerFrozen = false;
+          // Re-lock pointer inside this gesture where there is one (Escape
+          // keydown). The thank-you path closes from a timer — not a gesture —
+          // so Chrome may refuse; swallow either way. FpsController's click
+          // handler re-locks on the player's next click regardless.
+          try {
+            const result = renderer.domElement.requestPointerLock() as
+              | Promise<void>
+              | undefined;
+            result?.catch?.(() => {});
+          } catch {
+            // Pointer lock denied — re-lock happens on the next canvas click.
+          }
+          if (completed && servedCustomer) creditMoney(servedCustomer.basketTotalSen);
+          tillCustomer = null;
+        });
+      } catch (error) {
+        cashierMachine = null;
+        console.error("[main] Cashier machine setup failed.", error);
+      }
       // Customer flow — bundle ships the 3 capsule variants.
       try {
         customers = new Customers3D(scene, camera, bundle.customers);
@@ -488,6 +555,56 @@ function boot(): void {
     })
     .catch(() => hideLoading(loading));
 
+  // Anchor the machine screen DOM to the machine's WORLD position.
+  //
+  // Each frame we project the 3D screen centre (and its top edge, to gauge
+  // scale) through the camera and place the DOM element there. This keeps the
+  // screen fixed on the register — it moves with the world as you look/walk,
+  // and is hidden when the machine is behind the camera or off the viewport.
+  // (A CSS2DObject would do the same in principle, but this manual projection
+  // gives us exact control over scale + occlusion and removes any chance the
+  // overlay behaves like a camera-locked HUD.)
+  const machineScreenScratch = new THREE.Vector3();
+  const machineScreenTopScratch = new THREE.Vector3();
+  const updateMachineScreen = (): void => {
+    const el = cashierMachine?.getScreenElement();
+    if (!el || !cashierMachine) return;
+
+    machineScreenScratch.copy(cashierMachine.getScreenCenter());
+    machineScreenTopScratch
+      .copy(machineScreenScratch)
+      .setY(machineScreenScratch.y + MACHINE_SCREEN_HALF_H_M);
+
+    // Project to NDC using the camera transform that was just rendered.
+    machineScreenScratch.project(camera);
+    machineScreenTopScratch.project(camera);
+
+    const ndc = machineScreenScratch;
+    const inFront =
+      ndc.z > -1 && ndc.z < 1 && ndc.x > -1.1 && ndc.x < 1.1 && ndc.y > -1.1 && ndc.y < 1.1;
+    if (!inFront) {
+      if (el.style.display !== "none") el.style.display = "none";
+      return;
+    }
+    // Restore the flex-column layout the screen DOM ships with (clearing the
+    // property would fall back to `block` and break the vertical stacking).
+    if (el.style.display === "none") el.style.display = "flex";
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const cx = (ndc.x * 0.5 + 0.5) * w;
+    const cy = (-ndc.y * 0.5 + 0.5) * h;
+    const topY = (-machineScreenTopScratch.y * 0.5 + 0.5) * h;
+    // Projected height (px) of half the screen face → full face is ×2.
+    const projectedHalfH = Math.abs(cy - topY);
+    const scale = Math.max(0.05, (projectedHalfH * 2) / MACHINE_SCREEN_BASE_H);
+
+    // Centre the element on (cx, cy), then scale about its top-left origin.
+    const left = cx - (MACHINE_SCREEN_BASE_W * scale) / 2;
+    const top = cy - (MACHINE_SCREEN_BASE_H * scale) / 2;
+    el.style.transform = `translate(${left.toFixed(1)}px, ${top.toFixed(1)}px) scale(${scale.toFixed(4)})`;
+  };
+
   const clock = new THREE.Clock();
   const animate = (): void => {
     requestAnimationFrame(animate);
@@ -499,6 +616,7 @@ function boot(): void {
     // The belt keeps moving while the player is frozen at the till — that is
     // exactly when its placement/slide/bag animations matter.
     checkoutFlow?.update(dt);
+    cashierMachine?.update(dt);
     // Customers add/remove meshes inside update() — rebuild the hover
     // snapshot if the active customer changed this frame.
     syncHoverCandidates();
@@ -507,6 +625,9 @@ function boot(): void {
     // Raycast after the camera transform is final so hits match the render.
     updateHover();
     renderer.render(scene, camera);
+    // After the camera transform is final, glue the machine screen DOM to the
+    // machine's world position (projection uses the freshly-rendered camera).
+    updateMachineScreen();
   };
   animate();
 }
