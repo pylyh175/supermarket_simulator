@@ -81,10 +81,10 @@ function boot(): void {
   // Base pixel size of the machine-screen DOM element (matches
   // createMachineScreenDOM in cashierMachine.ts). main.ts scales it to the
   // projected size of the 3D screen face each frame.
-  const MACHINE_SCREEN_BASE_W = 320;
-  const MACHINE_SCREEN_BASE_H = 280;
+  const MACHINE_SCREEN_BASE_W = 160; // matches POLE_SCREEN_W_M (0.16 m)
+  const MACHINE_SCREEN_BASE_H = 100; // matches POLE_SCREEN_H_M (0.10 m)
   // Half-extents of the 3D screen face (metres) — see cashierMachine.ts.
-  const MACHINE_SCREEN_HALF_H_M = 0.14;
+  const MACHINE_SCREEN_HALF_H_M = 0.05; // POLE_SCREEN_H_M / 2
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -390,8 +390,9 @@ function boot(): void {
 
   // Interaction state for cashier machine (laser now handled in cashierMachine)
 
-  // E / Space at the till: open it for the waiting customer.
+  // Till open: E when player is at till and NOT frozen.
   window.addEventListener("keydown", (event) => {
+    if (playerFrozen) return; // only when NOT in a sale
     if (event.code !== "KeyE" && event.code !== "Space") return;
     if (!tillStation.isPlayerInside(player.position())) return;
     if (!customers) return;
@@ -416,20 +417,46 @@ function boot(): void {
     event.preventDefault();
   });
 
-  // Separate keydown for Escape (abandon) and scanner/keypad/drawer interactions
+  // In-sale controls: only active when playerFrozen is true.
+  // F = scan item, G = give change, D = toggle drawer, Esc = abandon.
   window.addEventListener("keydown", (event) => {
     if (!playerFrozen) return;
 
     if (event.code === "Escape") {
       event.preventDefault();
-      cashierMachine!.abandon(); // this will trigger onComplete with completed=false
+      cashierMachine!.abandon(); // triggers onComplete with completed=false
       return;
     }
 
-    // Scanner: E when aiming at scanner gun
-    if (event.code === "KeyE" && cashierMachine!.canScan()) {
+    if (event.code === "KeyF" && cashierMachine!.canScan()) {
+      // Scan item at scanner gun
+      event.preventDefault();
       cashierMachine!.onItemScanned();
       playBeep();
+      return;
+    }
+
+    if (event.code === "KeyG") {
+      // Give change — pick the suggested denomination and hand it over
+      event.preventDefault();
+      const remaining = cashierMachine!.getRemainingChange?.();
+      if (remaining && remaining > 0) {
+        // Suggest the largest denomination that fits
+        const denoms = [10000, 5000, 2000, 1000, 500, 100, 50, 20, 10, 5];
+        for (const d of denoms) {
+          if (d <= remaining) {
+            cashierMachine!.onChangeGiven(d);
+            break;
+          }
+        }
+      }
+      return;
+    }
+
+    if (event.code === "KeyD") {
+      // Toggle cash drawer
+      event.preventDefault();
+      cashierMachine!.toggleDrawer();
       return;
     }
   });

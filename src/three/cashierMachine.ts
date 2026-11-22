@@ -13,12 +13,21 @@ import type { CustomerAvatar } from "../game/customers3d";
 // ---------------------------------------------------------------------------
 const MACHINE_WIDTH_M = 0.48;    // x span (centered on counter)
 const MACHINE_DEPTH_M = 0.38;    // z span (north of belt, facing player)
-const MACHINE_HEIGHT_M = 0.42;   // body height; screen adds more
+const MACHINE_HEIGHT_M = 0.42;   // body height; screen pole adds more
 
+// Original large screen on top of body (kept for reference, but not used for overlay)
 const SCREEN_WIDTH_M = 0.32;
 const SCREEN_HEIGHT_M = 0.28;
 const SCREEN_THICKNESS_M = 0.018;
 const SCREEN_BOTTOM_ABOVE_BODY_M = 0.02;
+
+// New small register display on pole (right side, like real supermarket registers)
+const POLE_HEIGHT_M = 0.35;         // pole extends up from machine top
+const POLE_RADIUS_M = 0.015;        // thin pole
+const POLE_SCREEN_W_M = 0.16;       // 16 cm wide
+const POLE_SCREEN_H_M = 0.10;       // 10 cm tall
+const POLE_SCREEN_THICK_M = 0.012;  // thin panel
+const POLE_SCREEN_ABOVE_POLE_M = 0.02; // gap between pole top and screen bottom
 
 const SCANNER_GUN_WIDTH_M = 0.05;
 const SCANNER_GUN_HEIGHT_M = 0.07;
@@ -124,23 +133,43 @@ export function buildCashierMachineProps(): CashierMachineProps {
   body.position.y = MACHINE_HEIGHT_M / 2;
   group.add(body);
 
-  // --- Screen (on top of body, slightly back) ---
-  const screenBorder = new THREE.Mesh(
-    new THREE.BoxGeometry(SCREEN_WIDTH_M + 0.01, SCREEN_HEIGHT_M + 0.01, SCREEN_THICKNESS_M + 0.002),
+  // --- Pole + small register screen on right side (player's right) ---
+  // Pole base sits on machine top, slightly right of center
+  const poleBaseX = MACHINE_WIDTH_M / 2 - POLE_RADIUS_M - 0.02;
+  const poleBaseY = MACHINE_HEIGHT_M;
+  const poleBaseZ = MACHINE_DEPTH_M / 2 - 0.10; // slightly back from front edge
+
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(POLE_RADIUS_M, POLE_RADIUS_M, POLE_HEIGHT_M, 8),
+    new THREE.MeshLambertMaterial({ color: 0x3a3328, flatShading: true }),
+  );
+  pole.position.set(poleBaseX, poleBaseY + POLE_HEIGHT_M / 2, poleBaseZ);
+  group.add(pole);
+
+  // Small screen on top of pole
+  const poleScreenY = poleBaseY + POLE_HEIGHT_M + POLE_SCREEN_ABOVE_POLE_M + POLE_SCREEN_H_M / 2;
+  const poleScreenZ = poleBaseZ; // aligned with pole
+
+  const poleScreenBorder = new THREE.Mesh(
+    new THREE.BoxGeometry(POLE_SCREEN_W_M + 0.006, POLE_SCREEN_H_M + 0.006, POLE_SCREEN_THICK_M + 0.002),
     screenBorderMat,
   );
-  const screenZ = MACHINE_DEPTH_M / 2 - SCREEN_THICKNESS_M / 2 - 0.01; // back face of body
-  screenBorder.position.set(0, MACHINE_HEIGHT_M + SCREEN_BOTTOM_ABOVE_BODY_M + SCREEN_HEIGHT_M / 2, screenZ);
-  group.add(screenBorder);
+  poleScreenBorder.position.set(poleBaseX, poleScreenY, poleScreenZ);
+  group.add(poleScreenBorder);
 
-  const screenFace = new THREE.Mesh(
-    new THREE.BoxGeometry(SCREEN_WIDTH_M, SCREEN_HEIGHT_M, SCREEN_THICKNESS_M),
+  const poleScreenFace = new THREE.Mesh(
+    new THREE.BoxGeometry(POLE_SCREEN_W_M, POLE_SCREEN_H_M, POLE_SCREEN_THICK_M),
     screenBgMat,
   );
-  screenFace.position.set(0, MACHINE_HEIGHT_M + SCREEN_BOTTOM_ABOVE_BODY_M + SCREEN_HEIGHT_M / 2, screenZ + 0.001);
-  group.add(screenFace);
+  poleScreenFace.position.set(poleBaseX, poleScreenY, poleScreenZ + 0.001);
+  group.add(poleScreenFace);
 
-  const screenCenter = new THREE.Vector3(0, MACHINE_HEIGHT_M + SCREEN_BOTTOM_ABOVE_BODY_M + SCREEN_HEIGHT_M / 2, screenZ + SCREEN_THICKNESS_M / 2 + 0.001);
+  // The screen center for DOM projection — world position of the small screen face
+  const screenCenter = new THREE.Vector3(
+    poleBaseX,
+    poleScreenY,
+    poleScreenZ + POLE_SCREEN_THICK_M / 2 + 0.001,
+  );
 
   // --- Scanner gun (right side, angled down toward belt) ---
   const scannerGroup = new THREE.Group();
@@ -457,6 +486,8 @@ export interface CashierMachine {
   onCashReceived(): void;
   /** Called when player gives change (denomination in sen). */
   onChangeGiven(denomSen: number): void;
+  /** Get remaining change due in sen (for auto-suggest on G key). */
+  getRemainingChange(): number | null;
   /** True if drawer is open. */
   isDrawerOpen(): boolean;
   /** Toggle drawer open/closed (hold E on handle/front). */
@@ -799,6 +830,12 @@ export function createCashierMachine(
         printerTimer = PRINTER_DURATION_S;
       }
       renderScreen();
+    },
+
+    getRemainingChange() {
+      if (!active || !session || session.phase !== "change") return null;
+      const remaining = session.changeDueSen - session.givenSen;
+      return remaining > 0 ? remaining : null;
     },
 
     isDrawerOpen() {
