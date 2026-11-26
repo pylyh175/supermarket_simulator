@@ -38,6 +38,7 @@ export class FpsController {
   private readonly canvas: HTMLCanvasElement;
   private readonly bounds: Aabb;
 
+  private sensitivity = 1;
   private yawRad = 0;   // 0 = facing -Z
   private pitchRad = 0; // 0 = level
 
@@ -61,6 +62,16 @@ export class FpsController {
 
   yaw(): number {
     return this.yawRad;
+  }
+
+  /** Mouse-look multiplier from settings (1 = default). */
+  setSensitivity(multiplier: number): void {
+    this.sensitivity = multiplier;
+  }
+
+  /** Release any held movement keys (e.g. when the till takes over input). */
+  releaseKeys(): void {
+    this.onBlur();
   }
 
   /** Replace the active collider list (e.g. walls → walls + store props). */
@@ -110,8 +121,8 @@ export class FpsController {
 
   private readonly onMouseMove = (e: MouseEvent): void => {
     if (document.pointerLockElement !== this.canvas) return;
-    this.yawRad -= e.movementX * MOUSE_SENSITIVITY_RAD_PER_PX;
-    this.pitchRad -= e.movementY * MOUSE_SENSITIVITY_RAD_PER_PX;
+    this.yawRad -= e.movementX * MOUSE_SENSITIVITY_RAD_PER_PX * this.sensitivity;
+    this.pitchRad -= e.movementY * MOUSE_SENSITIVITY_RAD_PER_PX * this.sensitivity;
     this.pitchRad = Math.max(-PITCH_LIMIT_RAD, Math.min(PITCH_LIMIT_RAD, this.pitchRad));
   };
 
