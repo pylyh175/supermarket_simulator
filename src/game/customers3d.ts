@@ -19,7 +19,7 @@ import {
   findPath,
   pathPoints,
   type Point,
-} from "./storeRoutes";
+} from "./storeRoute";
 import {
   RIG_HEAD_TOP_M,
   buildRig,
