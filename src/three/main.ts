@@ -343,10 +343,10 @@ function boot(): void {
   const playerEuler = new THREE.Euler(0, 0, 0, "YXZ");
   // A Camera (not a plain Object3D): its lookAt aims −Z, like the render camera.
   const lookHelper = new THREE.Camera();
+  const tillEuler = new THREE.Euler(0, 0, 0, "YXZ");
 
   const updateCamera = (dt: number): void => {
-    // Slightly wider lens at the till so the customer, belt and drawer fit.
-    const fovTarget = cameraMode === "till" || cameraMode === "toTill" ? 76 : 70;
+    const fovTarget = 70;
     if (Math.abs(camera.fov - fovTarget) > 0.01) {
       camera.fov += (fovTarget - camera.fov) * Math.min(1, dt * 6);
       camera.updateProjectionMatrix();
@@ -357,11 +357,9 @@ function boot(): void {
       return;
     }
     if (cameraMode === "till") {
-      // Glance down into the cash drawer while it is open.
-      const k = machine?.drawerView() ?? 0;
-      const e = k * k * (3 - 2 * k);
-      camera.position.lerpVectors(tillPos, drawerPos, e);
-      camera.quaternion.slerpQuaternions(tillQuat, drawerQuat, e);
+      // Fixed position at counter, free mouse look rotation.
+      camera.position.copy(tillPos);
+      camera.rotation.set(player.pitch(), player.yaw(), 0);
       return;
     }
     glideT = Math.min(1, glideT + dt / CAMERA_GLIDE_S);
@@ -369,7 +367,12 @@ function boot(): void {
     if (cameraMode === "toTill") {
       camera.position.lerpVectors(glideFromPos, tillPos, e);
       camera.quaternion.slerpQuaternions(glideFromQuat, tillQuat, e);
-      if (glideT >= 1) cameraMode = "till";
+      if (glideT >= 1) {
+        // Sync FpsController orientation to the till pose so mouse look starts from here.
+        tillEuler.setFromQuaternion(tillQuat, "YXZ");
+        player.setOrientation(tillEuler.y, tillEuler.x);
+        cameraMode = "till";
+      }
     } else {
       glideToPos.set(player.position().x, eyeHeightM(), player.position().z);
       playerEuler.set(player.pitch(), player.yaw(), 0, "YXZ");
@@ -426,7 +429,7 @@ function boot(): void {
     playerFrozen = true;
     awaitingResume = false;
     player.releaseKeys();
-    if (document.pointerLockElement) document.exitPointerLock();
+    // Keep pointer lock so mouse look works at the till.
     hideHover();
     setCrosshairHidden(true);
     hud.legend.hidden = false;

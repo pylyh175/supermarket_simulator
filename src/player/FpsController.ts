@@ -74,6 +74,12 @@ export class FpsController {
     this.onBlur();
   }
 
+  /** Set the absolute camera orientation (yaw, pitch in radians). */
+  setOrientation(yaw: number, pitch: number): void {
+    this.yawRad = yaw;
+    this.pitchRad = Math.max(-PITCH_LIMIT_RAD, Math.min(PITCH_LIMIT_RAD, pitch));
+  }
+
   /** Replace the active collider list (e.g. walls → walls + store props). */
   setColliders(colliders: Aabb[]): void {
     this.colliders = colliders;

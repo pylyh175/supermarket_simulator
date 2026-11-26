@@ -424,12 +424,12 @@ export class CashierMachine {
     const p = this.group.position;
     if (view === "drawer") {
       return {
-        position: new THREE.Vector3(p.x - 0.1, 1.62, p.z + 1.0),
+        position: new THREE.Vector3(p.x - 0.1, 1.6, p.z + 0.7),
         target: new THREE.Vector3(p.x - 0.05, 0.9, p.z + 0.3),
       };
     }
     return {
-      position: new THREE.Vector3(p.x - 0.32, 1.72, p.z + 0.98),
+      position: new THREE.Vector3(p.x - 0.32, 1.72, p.z + 0.5),
       target: new THREE.Vector3(p.x - 0.3, 0.98, p.z - 0.26),
     };
   }
