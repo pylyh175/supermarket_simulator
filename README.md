@@ -8,7 +8,7 @@ Cozy first-person Malaysian supermarket cashier simulation for the browser — s
 - `npm run build` — type-check + production build into `dist/`
 
 ## Playing a shift
-The store trades 9:00 AM – 10:00 PM, compressed into 8 / 12 / 20 real minutes (settings). Shoppers walk in (door chime), browse the aisles, queue at the till, and leave with their bag. It gets busier at lunch and after work. At 10 PM the doors close; once the last customer is served, press **C** to close up and see the day's summary and drawer count.
+The store trades 9:00 AM – 10:00 PM, compressed into 8 / 12 / 20 real minutes (settings). Shoppers walk in (door chime), browse the aisles, queue at the till, and leave with their bag. It gets busier at lunch and after work. At 10 PM the doors close; once the last customer is served, press **E** at the till to close up and see the day's summary and drawer count.
 
 ### Walking
 - WASD / arrows — walk · Mouse — look (click to lock the pointer) · Esc — pause / settings
@@ -16,20 +16,20 @@ The store trades 9:00 AM – 10:00 PM, compressed into 8 / 12 / 20 real minutes 
 - **E** at the till — serve the customer waiting there.
 
 ### At the till
-| Key | Action |
-| --- | --- |
-| **F** | Scan the pack waiting at the scanner |
-| **B** / **N** | Add / remove a 20-sen plastic bag (match what the customer asked for) |
-| **C** / **Q** / **K** | Take payment by cash / DuitNow QR / card (the customer says which) |
-| **0–9** | Key in the cash received, in sen (`2030` = RM20.30); POS keys RM10/20/50/100 add notes |
-| **X** | Exact money |
-| Click drawer slots | Pick notes / coins onto the change tray |
-| **Enter** | Confirm the tender / hand the change over |
-| **Backspace** | Undo the last digit or put the last piece back |
-| **D** | Open / close the drawer |
-| **Esc** | Void the transaction (asks first) |
+Everything is done with the mouse. The only key is **Esc** — void the transaction (asks first; Esc again keeps serving).
 
-You can also click the POS keys with the mouse.
+| Click | Action |
+| --- | --- |
+| The handheld scanner (beside the belt) | Pick it up / put it back. It follows the cursor while held |
+| The pack at the scan line (scanner in hand) | Scan it — the scanner dips over the pack and beeps |
+| The stack of plastic bags | Add a 20-sen bag (match what the customer asked for) |
+| A placed bag | Take that bag back off the bill |
+| What the customer holds out | Take payment: cash goes straight into the drawer, a card is charged, a QR phone is scanned with the scanner (keep it in hand) |
+| Drawer slots | Pick notes / coins onto the change tray |
+| A piece on the tray | Put it back in the drawer |
+| The tray | Hand the change over |
+
+The drawer opens and closes by itself. The POS keypad is decorative.
 
 ### Malaysian details
 - Cash bills are rounded to the nearest 5 sen (Bank Negara rounding mechanism) and shown as a `Rounding Adj` line. QR and card pay the exact sen.
