@@ -2,31 +2,40 @@ import * as THREE from "three";
 import "../style.css";
 import { WebGLCheck } from "./WebGLCheck";
 import { buildStoreShell } from "./storeShell";
-import { buildStore } from "./storeLayout";
+import { buildStore, TILL_X, TILL_Z } from "./storeLayout";
 import { loadAssets } from "./assets";
 import { FpsController } from "../player/FpsController";
 import { eyeHeightM } from "../player/movement";
-import { Customers3D } from "../game/customers3d";
-import type { CustomerAvatar } from "../game/customers3d";
+import type { Aabb } from "../player/colliders";
+import { Customers3D, type CustomerAvatar } from "../game/customers3d";
 import { TillStation } from "../game/TillStation";
 import { CheckoutFlow } from "./checkoutFlow";
-import { buildCashierMachineProps, createCashierMachine, type CashierMachine } from "./cashierMachine";
-import { TILL_X, TILL_Z } from "./storeLayout";
-import { playBeep, playPlip, primeAudio } from "../audio/cues";
+import { CashierMachine, STAND_W, STORE_NAME, type SaleResult } from "./cashierMachine";
+import { playDoorChime, playPlip, primeAudio, setMasterVolume, startAmbience } from "../audio/cues";
 import { formatRinggit } from "../register/money";
 import { loadGame, saveGame } from "../state/save";
+import { loadSettings, saveSettings, type Settings } from "../state/settings";
 import { resolveTooltip, TOOLTIP_MAX_DISTANCE_M } from "../game/hover";
-import type { Customer } from "../customers/generate";
+import {
+  SHIFT_OPEN_MIN,
+  advanceClock,
+  emptyStats,
+  formatClock,
+  isAfterClosing,
+  recordSale,
+  type ShiftStats,
+} from "../game/shift";
+import { FLOAT_SEN } from "../register/drawer";
 
 // Clamp the per-frame delta (≤ 50 ms) so a tab-switch resume can't tunnel
 // the player through walls. Declared above the boot guard: boot() runs
 // synchronously and animate() reads this on the first frame.
 const MAX_FRAME_DELTA_S = 0.05;
+/** Seconds the camera takes to glide to / from the cashier's view. */
+const CAMERA_GLIDE_S = 0.55;
 
 // Hover tint written into the hovered instance's instanceColor slot and the
-// write-back value used on unhover (identity — meshes with no instanceColor
-// render base white anyway). Shared, never mutated: InstancedMesh.setColorAt
-// copies the values into the InstancedBufferAttribute.
+// write-back value used on unhover. Shared, never mutated.
 const HOVER_TINT = new THREE.Color(1.35, 1.25, 1.12);
 const INSTANCE_BASE_COLOR = new THREE.Color(1, 1, 1);
 
@@ -55,9 +64,6 @@ function boot(): void {
   scene.background = new THREE.Color("#f5efe0"); // warm cream
 
   // Cozy warm lighting, flat-shaded look — shadows intentionally OFF.
-  // Hemisphere: warm white sky over tan ground. Directional: soft warm
-  // key light from a slight angle, plus a dim warm fill from the doorway
-  // side so the back aisles never fall into harsh shadow.
   const hemisphere = new THREE.HemisphereLight(0xfff3e0, 0xb89a72, 1.0);
   scene.add(hemisphere);
   const sun = new THREE.DirectionalLight(0xffe6c0, 1.4);
@@ -67,24 +73,8 @@ function boot(): void {
   fill.position.set(-5, 6, -8);
   scene.add(fill);
 
-  const camera = new THREE.PerspectiveCamera(
-    70,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    100,
-  );
+  const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
   camera.rotation.order = "YXZ"; // yaw (Y) then pitch (X)
-
-  // The cashier machine's screen is a plain DOM element glued to the machine's
-// WORLD position (see updateMachineScreen below) — not a CSS2DObject — so it
-// stays on the register instead of tracking the camera.
-  // Base pixel size of the machine-screen DOM element (matches
-  // createMachineScreenDOM in cashierMachine.ts). main.ts scales it to the
-  // projected size of the 3D screen face each frame.
-  const MACHINE_SCREEN_BASE_W = 200; // matches createMachineScreenDOM (200 px)
-  const MACHINE_SCREEN_BASE_H = 130; // matches createMachineScreenDOM (130 px)
-  // Half-extents of the 3D screen face (metres) — see cashierMachine.ts.
-  const MACHINE_SCREEN_HALF_H_M = 0.065; // POLE_SCREEN_H_M / 2
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -92,84 +82,93 @@ function boot(): void {
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
+  // -------------------------------------------------------------------------
+  // Settings, save, HUD
+  // -------------------------------------------------------------------------
+  let settings: Settings = loadSettings();
+  setMasterVolume(settings.volume);
+
+  const saved = loadSavedGame();
+  let moneySen = saved?.moneySen ?? 0;
+  let day = saved?.day ?? 1;
+  let clockMinutes = SHIFT_OPEN_MIN;
+  let stats: ShiftStats = emptyStats();
+  let dayOver = false;
+
+  const hud = buildHud();
+  const renderMoney = (): void => {
+    hud.money.textContent = `Takings: ${formatRinggit(moneySen)}`;
+  };
+  let lastChangeKey = "";
+  const renderChangePanel = (status: { dueSen: number; onTraySen: number; hint: string | null } | null): void => {
+    const key = status ? `${status.dueSen}|${status.onTraySen}|${status.hint ?? ""}` : "";
+    if (key === lastChangeKey) return;
+    lastChangeKey = key;
+    hud.change.hidden = status === null;
+    if (!status) return;
+    hud.change.querySelector(".cp-due")!.textContent = formatRinggit(status.dueSen);
+    const tray = hud.change.querySelector<HTMLElement>(".cp-tray")!;
+    tray.textContent = formatRinggit(status.onTraySen);
+    tray.dataset.state = status.onTraySen === status.dueSen ? "exact" : status.onTraySen > status.dueSen ? "over" : "short";
+    const hint = hud.change.querySelector<HTMLElement>(".cp-hint")!;
+    hint.hidden = status.hint === null;
+    hint.textContent = status.hint ? `Hint: ${status.hint}` : "";
+  };
+  const renderClock = (): void => {
+    hud.clock.textContent = `Hari ${day} · ${formatClock(clockMinutes)}`;
+  };
+  renderMoney();
+  renderClock();
+  const persist = (): void => {
+    try {
+      saveGame({ version: 2, moneySen, day });
+    } catch {
+      // Storage full/blocked — progress still counts in memory.
+    }
+  };
+
   // Shell builds floor + walls + fog and returns the shared wall colliders.
-  // The player starts against walls-only colliders; once the asset bundle
-  // resolves, buildStore() appends the props and we swap in the merged list.
   const shellColliders = buildStoreShell(scene);
   const player = new FpsController(shellColliders, renderer.domElement);
+  player.setSensitivity(settings.sensitivity);
   camera.position.set(player.position().x, eyeHeightM(), player.position().z);
 
-  // Invisible till zone on the cashier side of the counter; the E/Space
-  // handler below polls it every press.
   const tillStation = new TillStation();
-  // While the till is "open" the player is frozen in place; mouse-look is
-  // already dead because we exit pointer lock.
+  // While the till is open the player is frozen and the mouse is free for
+  // the POS keys and the drawer.
   let playerFrozen = false;
-  // The POS strip no longer covers the canvas, so a click above it would
-  // re-lock the pointer mid-sale and steal the cursor from the change pad.
-  // Keep the old modal input behaviour: ignore canvas clicks while frozen
-  // (the view stays put; the belt is still visible above the strip).
-  renderer.domElement.addEventListener(
-    "click",
-    (event) => {
-      if (playerFrozen) event.stopImmediatePropagation();
-    },
-    true,
-  );
-  // Filled once the asset bundle resolves (customers come from the bundle).
+  let paused = true; // start screen
+  let awaitingResume = false;
+  let summaryOpen = false;
   let customers: Customers3D | null = null;
-  // Belt/bag/tote props + item pipeline; built with the store bundle so the
-  // hover snapshot includes the props as occluders.
   let checkoutFlow: CheckoutFlow | null = null;
-  // Cashier machine — owns screen, scanner, keypad, drawer, printer.
-  let cashierMachine: CashierMachine | null = null;
+  let machine: CashierMachine | null = null;
+  let tillAvatar: CustomerAvatar | null = null;
 
   // -------------------------------------------------------------------------
-  // Hover tooltip + crosshair (Task 3). A center-screen raycast shows a
-  // name + price pill within 2.2 m of a shelf product and brightens the
-  // hovered instance via instanceColor — a warm tint written to one slot and
-  // cleared back to white on unhover. Instanced product meshes SHARE materials
-  // with their archetypes, so shared materials are never mutated; the old
-  // material-swap path survives only as a defensive fallback for non-instanced
-  // meshes, cloning materials and restoring the originals on unhover.
+  // Hover tooltip + crosshair. A center-screen raycast shows a name + price
+  // pill within 2.2 m of a shelf product and brightens the hovered instance
+  // via instanceColor. Shared materials are never mutated.
   // -------------------------------------------------------------------------
   const crosshairEl = document.getElementById("crosshair");
   const tooltipEl = document.getElementById("item-tooltip");
-  const tooltipTitleEl =
-    tooltipEl?.querySelector<HTMLDivElement>(".tip-title") ?? null;
-  const tooltipPriceEl =
-    tooltipEl?.querySelector<HTMLDivElement>(".tip-price") ?? null;
+  const tooltipTitleEl = tooltipEl?.querySelector<HTMLDivElement>(".tip-title") ?? null;
+  const tooltipPriceEl = tooltipEl?.querySelector<HTMLDivElement>(".tip-price") ?? null;
 
-  // Reused query state — no per-frame allocation beyond three's own hit list.
   const hoverRaycaster = new THREE.Raycaster();
   hoverRaycaster.far = TOOLTIP_MAX_DISTANCE_M;
   const raycastCenter = new THREE.Vector2(0, 0);
-  // Snapshot of every mesh in the scene, rebuilt on every customer
-  // spawn/despawn (see syncHoverCandidates) — products arrive after the first
-  // build, and despawned avatars must not ghost as invisible occluders.
-  // Product meshes win via their productId ancestor; every other mesh acts
-  // as an occluder, so looking through a shelf at a far-side product shows
-  // nothing.
   let hoverCandidates: THREE.Mesh[] = [];
-  // Undefined = nothing cached; forces a re-resolve after a hide so a
-  // re-hover of the same product rewrites the pill exactly once.
   let lastTooltipId: string | undefined;
 
   const setCrosshairHidden = (hidden: boolean): void => {
     if (crosshairEl) crosshairEl.hidden = hidden;
   };
-
-  // Crosshair dot visibility: visible while pointer-locked. During a sale the
-  // pointer lock is released (the player is frozen at the register), so the dot
-  // hides automatically; the till open/close paths also call this explicitly.
   const updateCrosshairVisibility = (): void => {
     setCrosshairHidden(document.pointerLockElement == null);
   };
-  document.addEventListener("pointerlockchange", updateCrosshairVisibility);
-  // Initial state — not locked at boot, so the dot starts hidden.
   updateCrosshairVisibility();
 
-  // Mirror of the element's visibility — lets repeat calls no-op.
   let tooltipVisible = false;
   const setTooltipVisible = (visible: boolean): void => {
     if (!tooltipEl || tooltipVisible === visible) return;
@@ -182,7 +181,6 @@ function boot(): void {
     if (productId !== lastTooltipId) {
       const resolved = resolveTooltip(productId);
       if (!resolved) {
-        // Unknown id — hide rather than show an empty pill.
         lastTooltipId = undefined;
         setTooltipVisible(false);
         return;
@@ -199,17 +197,10 @@ function boot(): void {
     setTooltipVisible(false);
   };
 
-  // Single-slot memo: at most one highlight is live at a time. Instanced
-  // hits restore via instanceColor (slot written back to white); the old
-  // material-swap path stays for non-instanced meshes (defensive — the
-  // store build only spawns InstancedMesh product meshes today). Instanced
-  // path shares the archetype's materials, so they are never cloned/mutated.
   const HOVER_EMISSIVE = "#3a2a00";
   interface HoverLift {
     mesh: THREE.Mesh;
-    // Set when the lift went through instanceColor; original/clones stay null.
     instanceId: number | null;
-    // Material-swap fallback state; null when the lift went through instanceColor.
     original: THREE.Material | THREE.Material[] | null;
     clones: THREE.Material[];
   }
@@ -217,7 +208,6 @@ function boot(): void {
 
   const liftOne = (material: THREE.Material): THREE.Material => {
     const clone = material.clone();
-    // Lambert/Standard all have emissive; Basic doesn't — lift only a glow.
     const emissive = (clone as THREE.MeshStandardMaterial).emissive;
     if (emissive) emissive.set(HOVER_EMISSIVE);
     return clone;
@@ -228,8 +218,6 @@ function boot(): void {
     const { mesh, instanceId, original, clones } = hoverLift;
     if (instanceId !== null && (mesh as THREE.InstancedMesh).isInstancedMesh) {
       const instanced = mesh as THREE.InstancedMesh;
-      // instanceColor exists by now (set at lift time); guard for the
-      // "lifted before any setColorAt" edge anyway.
       if (instanced.instanceColor) {
         instanced.setColorAt(instanceId, INSTANCE_BASE_COLOR);
         instanced.instanceColor.needsUpdate = true;
@@ -242,39 +230,27 @@ function boot(): void {
   };
 
   const liftHovered = (mesh: THREE.Mesh, instanceId?: number): void => {
-    const instanced = (mesh as THREE.InstancedMesh).isInstancedMesh
-      ? (mesh as THREE.InstancedMesh)
-      : null;
+    const instanced = (mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh) : null;
     const slot =
-      instanced &&
-      typeof instanceId === "number" &&
-      Number.isInteger(instanceId) &&
-      instanceId >= 0 &&
-      instanceId < instanced.count
+      instanced && typeof instanceId === "number" && Number.isInteger(instanceId) && instanceId >= 0 && instanceId < instanced.count
         ? instanceId
         : null;
     if (instanced) {
       if (slot === null) {
-        // Missing/out-of-range instanceId — clear any prior lift; never
-        // fall through to the swap path (materials are shared by the bake).
         unliftHovered();
         return;
       }
       if (hoverLift?.mesh === mesh && hoverLift.instanceId === slot) return;
       unliftHovered();
       instanced.setColorAt(slot, HOVER_TINT);
-      if (instanced.instanceColor) {
-        instanced.instanceColor.needsUpdate = true;
-      }
+      if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
       hoverLift = { mesh, instanceId: slot, original: null, clones: [] };
       return;
     }
     if (hoverLift?.mesh === mesh && hoverLift.instanceId === null) return;
     unliftHovered();
-    // Defensive fallback: non-instanced mesh — old material-swap path.
     const original = mesh.material;
     if (Array.isArray(original)) {
-      // Every face glows slightly — boxes/tins use shared material arrays.
       const clones = original.map(liftOne);
       mesh.material = clones;
       hoverLift = { mesh, instanceId: null, original, clones };
@@ -290,8 +266,6 @@ function boot(): void {
     unliftHovered();
   };
 
-  // Nearest mesh at or below this distance with an ancestor carrying
-  // userData.productId shows the tooltip; anything else hides it.
   const productIdOf = (obj: THREE.Object3D): string | null => {
     let cur: THREE.Object3D | null = obj;
     while (cur) {
@@ -302,10 +276,8 @@ function boot(): void {
     return null;
   };
 
-  // One traverse per call. Run at boot (after the store + first customer
-  // exist) and again on every customer spawn/despawn via syncHoverCandidates.
-  // Hidden groups (the checkout tote between sales) must not ghost as
-  // invisible occluders — three's raycaster ignores Object3D.visible.
+  // Hidden groups must not ghost as invisible occluders — three's raycaster
+  // ignores Object3D.visible.
   const isVisibleInScene = (obj: THREE.Object3D): boolean => {
     let cur: THREE.Object3D | null = obj;
     while (cur) {
@@ -320,39 +292,30 @@ function boot(): void {
       const mesh = obj as THREE.Mesh;
       if (!mesh.isMesh) return;
       if (!isVisibleInScene(mesh)) return;
-      // Rail tag planes are zero-thickness prints; excluded from the hover ray so packs behind them remain hoverable.
       if (mesh.userData?.isRailTag === true) return;
       candidates.push(mesh);
     });
     hoverCandidates = candidates;
   };
 
-  // Customers spawn/despawn dynamically: despawn() removes the old group from
-  // the scene and immediately spawns the next one, all inside
-  // customers3d.update(). Rebuilding on any change of the active-customer
-  // reference (one per lifecycle) keeps the snapshot accurate — a per-frame
-  // reference compare is free, the traverse only runs on an actual change.
-  let lastHoverCustomer: Customer | null = null;
+  // Shoppers spawn/despawn dynamically — rebuild the occluder snapshot when
+  // the crowd changes (cheap version compare per frame).
+  let lastCrowdVersion = -1;
   const syncHoverCandidates = (): void => {
-    const current = customers?.getActiveCustomer() ?? null;
-    if (current === lastHoverCustomer) return;
-    lastHoverCustomer = current;
+    const version = customers?.version ?? 0;
+    if (version === lastCrowdVersion) return;
+    lastCrowdVersion = version;
     collectHoverCandidates();
   };
 
   const updateHover = (): void => {
-    if (playerFrozen) {
+    if (playerFrozen || paused) {
       hideHover();
       return;
     }
     hoverRaycaster.setFromCamera(raycastCenter, camera);
-    // Flat list — recursive=false; hits are meshes themselves, no duplicates,
-    // and three sorts them nearest-first, so hits[0] is the closest mesh.
     const hits = hoverRaycaster.intersectObjects(hoverCandidates, false);
-    const hit =
-      hits.length > 0 && hits[0].distance <= TOOLTIP_MAX_DISTANCE_M
-        ? hits[0]
-        : undefined;
+    const hit = hits.length > 0 && hits[0].distance <= TOOLTIP_MAX_DISTANCE_M ? hits[0] : undefined;
     const mesh = hit?.object as THREE.Mesh | undefined;
     const productId = hit ? productIdOf(hit.object) : null;
     if (hit && mesh?.isMesh && productId) {
@@ -363,364 +326,607 @@ function boot(): void {
     }
   };
 
-  // Cash-in-till, integer sen. Task 8: loaded from the save at boot before
-  // the first HUD render (no RM0.00 flash), and persisted on every completed
-  // sale inside creditMoney() — the one place money changes hands.
-  let moneySen = loadSavedMoney() ?? 0;
-  renderMoneyHud(moneySen);
-  const creditMoney = (amountSen: number): void => {
-    moneySen += amountSen;
-    renderMoneyHud(moneySen);
-    persistMoney(moneySen);
+  // -------------------------------------------------------------------------
+  // Camera: first-person, or a glide to/from the cashier's view at the till.
+  // -------------------------------------------------------------------------
+  type CameraMode = "player" | "toTill" | "till" | "toPlayer";
+  let cameraMode: CameraMode = "player";
+  let glideT = 0;
+  const glideFromPos = new THREE.Vector3();
+  const glideFromQuat = new THREE.Quaternion();
+  const glideToPos = new THREE.Vector3();
+  const tillPos = new THREE.Vector3();
+  const tillQuat = new THREE.Quaternion();
+  const drawerPos = new THREE.Vector3();
+  const drawerQuat = new THREE.Quaternion();
+  const playerQuat = new THREE.Quaternion();
+  const playerEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  // A Camera (not a plain Object3D): its lookAt aims −Z, like the render camera.
+  const lookHelper = new THREE.Camera();
+
+  const updateCamera = (dt: number): void => {
+    // Slightly wider lens at the till so the customer, belt and drawer fit.
+    const fovTarget = cameraMode === "till" || cameraMode === "toTill" ? 76 : 70;
+    if (Math.abs(camera.fov - fovTarget) > 0.01) {
+      camera.fov += (fovTarget - camera.fov) * Math.min(1, dt * 6);
+      camera.updateProjectionMatrix();
+    }
+    if (cameraMode === "player") {
+      camera.position.set(player.position().x, eyeHeightM(), player.position().z);
+      camera.rotation.set(player.pitch(), player.yaw(), 0);
+      return;
+    }
+    if (cameraMode === "till") {
+      // Glance down into the cash drawer while it is open.
+      const k = machine?.drawerView() ?? 0;
+      const e = k * k * (3 - 2 * k);
+      camera.position.lerpVectors(tillPos, drawerPos, e);
+      camera.quaternion.slerpQuaternions(tillQuat, drawerQuat, e);
+      return;
+    }
+    glideT = Math.min(1, glideT + dt / CAMERA_GLIDE_S);
+    const e = glideT * glideT * (3 - 2 * glideT);
+    if (cameraMode === "toTill") {
+      camera.position.lerpVectors(glideFromPos, tillPos, e);
+      camera.quaternion.slerpQuaternions(glideFromQuat, tillQuat, e);
+      if (glideT >= 1) cameraMode = "till";
+    } else {
+      glideToPos.set(player.position().x, eyeHeightM(), player.position().z);
+      playerEuler.set(player.pitch(), player.yaw(), 0, "YXZ");
+      playerQuat.setFromEuler(playerEuler);
+      camera.position.lerpVectors(glideFromPos, glideToPos, e);
+      camera.quaternion.slerpQuaternions(glideFromQuat, playerQuat, e);
+      if (glideT >= 1) cameraMode = "player";
+    }
   };
-  // The customer currently at the till — captured at open time so the close
-  // handler can credit the right basket and complete the service.
-  let tillCustomer: Customer | null = null;
-  // #labels (customer name DOM, built from JS by customers3d.ts) hides while
-  // the till is open — the customer is across the counter and irrelevant to
-  // the overlay — and comes back when it closes.
-  const setLabelsHidden = (hidden: boolean): void => {
-    const labels = document.getElementById("labels");
-    if (labels) labels.hidden = hidden;
+
+  const glideToTill = (): void => {
+    if (!machine) return;
+    const pose = machine.cameraPose("counter");
+    tillPos.copy(pose.position);
+    lookHelper.position.copy(pose.position);
+    lookHelper.lookAt(pose.target);
+    tillQuat.copy(lookHelper.quaternion);
+    const drawer = machine.cameraPose("drawer");
+    drawerPos.copy(drawer.position);
+    lookHelper.position.copy(drawer.position);
+    lookHelper.lookAt(drawer.target);
+    drawerQuat.copy(lookHelper.quaternion);
+    glideFromPos.copy(camera.position);
+    glideFromQuat.copy(camera.quaternion);
+    glideT = 0;
+    cameraMode = "toTill";
   };
 
-  // Interaction state for cashier machine (laser now handled in cashierMachine)
+  const glideToPlayer = (): void => {
+    glideFromPos.copy(camera.position);
+    glideFromQuat.copy(camera.quaternion);
+    glideT = 0;
+    cameraMode = "toPlayer";
+  };
 
-  // Till open: E when player is at till and NOT frozen.
-  window.addEventListener("keydown", (event) => {
-    if (playerFrozen) return; // only when NOT in a sale
-    if (event.code !== "KeyE" && event.code !== "Space") return;
-    if (!tillStation.isPlayerInside(player.position())) return;
-    // The machine must exist before the player is frozen — otherwise the sale
-    // could never be started or closed (a permanent freeze).
-    if (!cashierMachine || !customers) return;
-    const customer = customers.getActiveCustomer();
-    if (!customer) return;
-    if (!customers.beginService()) return;
-
-    // This keypress is the user gesture that unlocks WebAudio, and the sale
-    // starts the customer's placement tosses.
+  // -------------------------------------------------------------------------
+  // Till open / close
+  // -------------------------------------------------------------------------
+  const openTill = (): void => {
+    if (!machine || !customers || playerFrozen) return;
+    const avatar = customers.getTillCustomer();
+    if (!avatar || !customers.beginService()) return;
     primeAudio();
+    tillAvatar = avatar;
     try {
-      checkoutFlow?.begin(customer);
-      cashierMachine.begin(
-        customer,
-        customers.getActiveCustomerAvatar() ?? undefined,
-      );
+      machine.begin(avatar);
     } catch (error) {
-      // Never leave the player frozen in a half-started sale.
       console.error("[main] Could not open the till — sale rolled back.", error);
       checkoutFlow?.abandon();
-      customers.completeService();
+      customers.completeService(false);
+      tillAvatar = null;
       return;
     }
-
     playerFrozen = true;
+    awaitingResume = false;
+    player.releaseKeys();
     if (document.pointerLockElement) document.exitPointerLock();
-    tillCustomer = customer;
-    setLabelsHidden(true);
-    setCrosshairHidden(true);
     hideHover();
-    // Keep the dot hidden (it stays hidden even if the lock exit hasn't
-    // landed yet).
-    updateCrosshairVisibility();
-    event.preventDefault();
-  });
+    setCrosshairHidden(true);
+    hud.legend.hidden = false;
+    hud.prompt.hidden = true;
+    hud.resume.hidden = true;
+    glideToTill();
+  };
 
-  // In-sale controls: only active when playerFrozen is true.
-  // F = scan item, G = give change, D = toggle drawer, Esc = abandon.
+  const onSaleComplete = (result: SaleResult): void => {
+    const s = result.session;
+    if (result.paid && s.method) {
+      moneySen += s.totalDueSen;
+      stats = recordSale(stats, {
+        method: s.method,
+        totalSen: s.totalDueSen,
+        bags: s.bags,
+        roundingSen: s.roundingSen,
+        changeFirstTry: s.changeDueSen > 0 ? s.changeAttempts === 1 && s.returnedSen === 0 : null,
+      });
+      renderMoney();
+      persist();
+    }
+    customers?.completeService(result.paid);
+    tillAvatar = null;
+    playerFrozen = false;
+    hud.legend.hidden = true;
+    machine?.hover(null);
+    renderer.domElement.style.cursor = "";
+    glideToPlayer();
+    // Browsers usually refuse a pointer-lock request outside a user gesture,
+    // so ask for one click to resume walking.
+    awaitingResume = true;
+    hud.resume.hidden = false;
+  };
+
+  // -------------------------------------------------------------------------
+  // Input
+  // -------------------------------------------------------------------------
   window.addEventListener("keydown", (event) => {
-    if (!playerFrozen) return;
-    const machine = cashierMachine;
-    if (!machine) return;
-
-    if (event.code === "Escape") {
-      event.preventDefault();
-      machine.abandon(); // triggers onComplete with completed=false
+    if (summaryOpen) return;
+    if (playerFrozen) {
+      if (machine?.handleKey(event.code)) event.preventDefault();
       return;
     }
-
-    if (event.code === "KeyF") {
-      event.preventDefault();
-      if (machine.canScan()) {
-        machine.onItemScanned();
-        playBeep();
-      } else {
-        machine.onScanBlocked();
+    if (paused) return;
+    if (event.code === "KeyE" || event.code === "Space") {
+      if (tillStation.isPlayerInside(player.position())) {
+        openTill();
+        event.preventDefault();
       }
       return;
     }
-
-    if (event.code === "KeyG") {
-      // Give change — pick the suggested denomination and hand it over
+    if (event.code === "KeyC" && dayOver && customers?.storeEmpty()) {
+      openSummary();
       event.preventDefault();
-      const remaining = machine.getRemainingChange();
-      if (remaining && remaining > 0) {
-        // Suggest the largest denomination that fits
-        const denoms = [10000, 5000, 2000, 1000, 500, 100, 50, 20, 10, 5];
-        for (const d of denoms) {
-          if (d <= remaining) {
-            machine.onChangeGiven(d);
-            break;
-          }
-        }
-      }
-      return;
-    }
-
-    if (event.code === "KeyD") {
-      // Toggle cash drawer
-      event.preventDefault();
-      machine.toggleDrawer();
-      return;
     }
   });
 
-  // Mouse click for keypad and drawer handle (when pointer unlocked, i.e., till open)
-  renderer.domElement.addEventListener("click", (event) => {
-    if (!playerFrozen) return;
-    const machine = cashierMachine;
-    if (!machine) return;
-    // We need pointer lock released for mouse clicks to work on CSS2D/raycast
-    if (document.pointerLockElement) return;
-
+  const pointer = new THREE.Vector2();
+  const clickRaycaster = new THREE.Raycaster();
+  const toPointer = (event: MouseEvent): void => {
     const rect = renderer.domElement.getBoundingClientRect();
-    const mouse = new THREE.Vector2(
-      ((event.clientX - rect.left) / rect.width) * 2 - 1,
-      -((event.clientY - rect.top) / rect.height) * 2 + 1,
-    );
+    pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+    clickRaycaster.setFromCamera(pointer, camera);
+  };
+  // Capture phase on the canvas: while the till is open this listener takes
+  // the click (POS keys, drawer slots, tray) and stops it reaching the
+  // FpsController, whose click handler would re-lock the pointer. Stopping
+  // propagation here used to swallow the till's own handler too.
+  renderer.domElement.addEventListener(
+    "click",
+    (event) => {
+      if (!playerFrozen) return;
+      event.stopImmediatePropagation();
+      if (!machine || cameraMode !== "till") return;
+      toPointer(event);
+      machine.click(clickRaycaster);
+    },
+    true,
+  );
+  renderer.domElement.addEventListener("mousemove", (event) => {
+    if (!playerFrozen || !machine || cameraMode !== "till") return;
+    toPointer(event);
+    renderer.domElement.style.cursor = machine.hover(clickRaycaster) ? "pointer" : "";
+  });
 
-    const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(mouse, camera);
+  // -------------------------------------------------------------------------
+  // Start / pause menu with settings
+  // -------------------------------------------------------------------------
+  const menu = buildMenu(settings, (next) => {
+    settings = next;
+    saveSettings(settings);
+    setMasterVolume(settings.volume);
+    player.setSensitivity(settings.sensitivity);
+  });
+  const resumePlay = (): void => {
+    paused = false;
+    menu.root.hidden = true;
+  };
+  menu.onPlay = () => {
+    primeAudio();
+    startAmbience();
+    try {
+      const result = renderer.domElement.requestPointerLock() as Promise<void> | undefined;
+      // Pointer lock refused (e.g. cooldown right after Esc) — play anyway;
+      // the next canvas click locks the mouse.
+      result?.catch?.(() => resumePlay());
+    } catch {
+      resumePlay();
+    }
+  };
+  menu.setDay(day);
+  menu.show(day === 1 && moneySen === 0 ? "Selamat datang!" : `Hari ${day}`);
 
-    // Check drawer handle first
-    const drawerHandle = machine.getDrawerHandle();
-    const handleHits = raycaster.intersectObject(drawerHandle, true);
-    if (handleHits.length > 0) {
-      machine.toggleDrawer();
+  document.addEventListener("pointerlockchange", () => {
+    updateCrosshairVisibility();
+    if (document.pointerLockElement === renderer.domElement) {
+      resumePlay();
+      awaitingResume = false;
+      hud.resume.hidden = true;
       return;
     }
-
-    // Check keypad buttons
-    const keyMeshes = machine.getKeyMeshes();
-    for (const [denom, mesh] of keyMeshes) {
-      const hits = raycaster.intersectObject(mesh, true);
-      if (hits.length > 0) {
-        machine.onChangeGiven(denom);
-        return;
-      }
+    // Esc while walking → pause menu (the till and summary own their own UI).
+    if (!playerFrozen && !awaitingResume && !summaryOpen) {
+      paused = true;
+      menu.show("Paused");
     }
   });
 
-  // Kick off the asset pipeline. The scene shell renders immediately;
-  // the bundle resolves in the background (procedural builds are fast,
-  // glTFs are small local files) and the overlay fades out on resolve.
-  // loadAssets() never throws — a total failure still hides the overlay.
+  // -------------------------------------------------------------------------
+  // Closing time + end-of-shift summary
+  // -------------------------------------------------------------------------
+  const summary = buildSummary();
+  const openSummary = (): void => {
+    if (!machine) return;
+    summaryOpen = true;
+    paused = true;
+    if (document.pointerLockElement) document.exitPointerLock();
+    hud.banner.hidden = true;
+    const drawer = machine.drawerCount();
+    summary.render(day, stats, {
+      floatSen: FLOAT_SEN,
+      topUpsSen: drawer.floatAndTopUpsSen - FLOAT_SEN,
+      cashSalesSen: stats.byMethod.cash.sen,
+      expectedSen: drawer.floatAndTopUpsSen + stats.byMethod.cash.sen,
+      countedSen: drawer.actualSen,
+    });
+    summary.root.hidden = false;
+  };
+  summary.onNextDay = () => {
+    day += 1;
+    clockMinutes = SHIFT_OPEN_MIN;
+    stats = emptyStats();
+    dayOver = false;
+    machine?.resetDay();
+    customers?.reset();
+    persist();
+    renderClock();
+    summary.root.hidden = true;
+    summaryOpen = false;
+    menu.setDay(day);
+    menu.show(`Hari ${day}`);
+  };
+
+  // -------------------------------------------------------------------------
+  // Assets → store, belt, POS, customers
+  // -------------------------------------------------------------------------
   loadAssets((label, progress) => updateLoading(loading, label, progress))
     .then((bundle) => {
-      // Store is built once, here — inject the merged shell+prop collider
-      // list so shelves/counters are solid without rebuilding the player.
+      let colliders: Aabb[] = shellColliders;
       try {
-        player.setColliders(buildStore(scene, bundle));
+        colliders = buildStore(scene, bundle);
       } catch (error) {
-        // Store stays unbuilt but the game still boots on shell colliders.
         console.error("[main] buildStore failed — props not shown.", error);
       }
-      // Checkout belt: built with the bundle so its belt/bag/tote props are in
-      // the scene before the hover snapshot below. A failure leaves the
-      // register fully usable (canScan falls back to true).
       try {
         checkoutFlow = new CheckoutFlow(scene, bundle);
         checkoutFlow.onItemPlaced = playPlip;
+        checkoutFlow.onItemLaunched = () => tillAvatar?.gesture("reach", null, 0.55);
       } catch (error) {
         checkoutFlow = null;
         console.error("[main] Checkout flow setup failed — belt disabled.", error);
       }
-      // Cashier machine: built with the bundle so its prop is in the scene.
       try {
-        const machineProps = buildCashierMachineProps();
-        // Position machine on counter (north of belt, centered)
-        // Counter center is at TILL_X, TILL_Z; belt is south of center.
-        // Machine sits north of belt on counter top.
+        // POS stand beside the counter's east end, on the cashier's right.
         const counterBox = new THREE.Box3().setFromObject(bundle.counter);
-        const counterSize = counterBox.getSize(new THREE.Vector3());
-        const counterCenterX = TILL_X + (counterBox.min.x + counterBox.max.x) / 2;
-        const counterCenterZ = TILL_Z + (counterBox.min.z + counterBox.max.z) / 2;
-        const topY = counterBox.max.y;
-        machineProps.group.position.set(counterCenterX, topY, counterCenterZ + 0.15); // north of belt
-        cashierMachine = createCashierMachine(scene, machineProps, {
-          canScan: () => checkoutFlow?.canScan() ?? true,
-          onItemScanned: () => checkoutFlow?.onItemScanned(),
-          abandon: () => checkoutFlow?.abandon(),
-          isActive: () => checkoutFlow?.isActive() ?? false,
+        const standX = TILL_X + counterBox.max.x + 0.06 + STAND_W / 2;
+        const standZ = TILL_Z + 0.12;
+        machine = new CashierMachine(scene, {
+          position: new THREE.Vector3(standX, 0, standZ),
+          checkout: checkoutFlow,
+          changeHint: () => settings.changeHint,
+          toast: (text) => hud.toast(text),
         });
-
-        // Cashier machine completion handler — register AFTER machine exists
-        cashierMachine.onComplete((completed: boolean, servedCustomer: Customer | null) => {
-          setLabelsHidden(false);
-          setCrosshairHidden(false);
-          updateCrosshairVisibility();
-          hideHover();
-          showLockHint();
-          checkoutFlow?.abandon();
-          customers?.completeService();
-          playerFrozen = false;
-          // Re-lock pointer inside this gesture where there is one (Escape
-          // keydown). The thank-you path closes from a timer — not a gesture —
-          // so Chrome may refuse; swallow either way. FpsController's click
-          // handler re-locks on the player's next click regardless.
-          try {
-            const result = renderer.domElement.requestPointerLock() as
-              | Promise<void>
-              | undefined;
-            result?.catch?.(() => {});
-          } catch {
-            // Pointer lock denied — re-lock happens on the next canvas click.
-          }
-          if (completed && servedCustomer) creditMoney(servedCustomer.basketTotalSen);
-          tillCustomer = null;
-        });
+        machine.onComplete = onSaleComplete;
+        colliders = [...colliders, ...machine.colliders()];
       } catch (error) {
-        cashierMachine = null;
+        machine = null;
         console.error("[main] Cashier machine setup failed.", error);
       }
-      // Customer flow — bundle ships the 3 capsule variants.
+      player.setColliders(colliders);
       try {
-        customers = new Customers3D(scene, camera, bundle.customers);
-        customers.spawnNextCustomer();
+        customers = new Customers3D(scene, camera);
+        customers.onArrive = playDoorChime;
       } catch (error) {
-        console.error("[main] Customer setup failed — no customers will spawn.", error);
+        console.error("[main] Customer setup failed — no customers will come.", error);
       }
-      // Hover snapshot — after the store (and first customer) exist. Seed
-      // the tracker so the first animate() frame doesn't re-traverse.
       collectHoverCandidates();
-      lastHoverCustomer = customers?.getActiveCustomer() ?? null;
       hideLoading(loading);
     })
     .catch(() => hideLoading(loading));
 
-  // Anchor the machine screen DOM to the machine's WORLD position.
-  //
-  // Each frame we project the 3D screen centre (and its top edge, to gauge
-  // scale) through the camera and place the DOM element there. This keeps the
-  // screen fixed on the register — it moves with the world as you look/walk,
-  // and is hidden when the machine is behind the camera or off the viewport.
-  // (A CSS2DObject would do the same in principle, but this manual projection
-  // gives us exact control over scale + occlusion and removes any chance the
-  // overlay behaves like a camera-locked HUD.)
-  const machineScreenScratch = new THREE.Vector3();
-  const machineScreenTopScratch = new THREE.Vector3();
-  const updateMachineScreen = (): void => {
-    const el = cashierMachine?.getScreenElement();
-    if (!el || !cashierMachine) return;
+  // -------------------------------------------------------------------------
+  // Frame loop
+  // -------------------------------------------------------------------------
+  // Dev-only handle for automated play-testing (stripped from production).
+  if (import.meta.env.DEV) {
+    (window as unknown as { __sim: unknown }).__sim = {
+      player,
+      camera,
+      customers: () => customers,
+      machine: () => machine,
+      setClock: (minutes: number) => {
+        clockMinutes = minutes;
+      },
+    };
+  }
 
-    machineScreenScratch.copy(cashierMachine.getScreenCenter());
-    machineScreenTopScratch
-      .copy(machineScreenScratch)
-      .setY(machineScreenScratch.y + MACHINE_SCREEN_HALF_H_M);
-
-    // Project to NDC using the camera transform that was just rendered.
-    machineScreenScratch.project(camera);
-    machineScreenTopScratch.project(camera);
-
-    const ndc = machineScreenScratch;
-    const inFront =
-      ndc.z > -1 && ndc.z < 1 && ndc.x > -1.1 && ndc.x < 1.1 && ndc.y > -1.1 && ndc.y < 1.1;
-    if (!inFront) {
-      if (el.style.display !== "none") el.style.display = "none";
-      return;
-    }
-    // Restore the flex-column layout the screen DOM ships with (clearing the
-    // property would fall back to `block` and break the vertical stacking).
-    if (el.style.display === "none") el.style.display = "flex";
-
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    const cx = (ndc.x * 0.5 + 0.5) * w;
-    const cy = (-ndc.y * 0.5 + 0.5) * h;
-    const topY = (-machineScreenTopScratch.y * 0.5 + 0.5) * h;
-    // Projected height (px) of half the screen face → full face is ×2.
-    const projectedHalfH = Math.abs(cy - topY);
-    const scale = Math.max(0.05, (projectedHalfH * 2) / MACHINE_SCREEN_BASE_H);
-
-    // Centre the element on (cx, cy), then scale about its top-left origin.
-    const left = cx - (MACHINE_SCREEN_BASE_W * scale) / 2;
-    const top = cy - (MACHINE_SCREEN_BASE_H * scale) / 2;
-    el.style.transform = `translate(${left.toFixed(1)}px, ${top.toFixed(1)}px) scale(${scale.toFixed(4)})`;
-  };
-
-  const clock = new THREE.Clock();
-  const animate = (): void => {
+  const timer = new THREE.Timer();
+  let lastClockLabel = "";
+  const animate = (timestamp?: number): void => {
     requestAnimationFrame(animate);
-    const dt = Math.min(clock.getDelta(), MAX_FRAME_DELTA_S);
-    // Frozen while the till is open: no movement (mouse-look is already
-    // dead — pointer lock was exited). The camera still tracks the spot.
-    if (!playerFrozen) player.update(dt);
-    customers?.update(dt);
-    // The belt keeps moving while the player is frozen at the till — that is
-    // exactly when its placement/slide/bag animations matter.
-    checkoutFlow?.update(dt);
-    cashierMachine?.update(dt);
-    // Customers add/remove meshes inside update() — rebuild the hover
-    // snapshot if the active customer changed this frame.
+    timer.update(timestamp);
+    const dt = Math.min(timer.getDelta(), MAX_FRAME_DELTA_S);
+    // The world keeps moving at the till; the pause menu and summary stop it.
+    const simRunning = playerFrozen || !paused;
+
+    if (simRunning) {
+      if (!playerFrozen && cameraMode === "player") player.update(dt);
+      clockMinutes = advanceClock(clockMinutes, dt, settings.shiftMinutes * 60);
+      if (!dayOver && isAfterClosing(clockMinutes)) {
+        dayOver = true;
+        hud.toast("10:00 PM — doors closed. Serve the customers still inside.");
+      }
+      customers?.update(dt, player.position(), clockMinutes, !dayOver);
+      checkoutFlow?.update(dt);
+      machine?.update(dt);
+    }
+
+    const label = formatClock(clockMinutes);
+    if (label !== lastClockLabel) {
+      lastClockLabel = label;
+      renderClock();
+      machine?.setClockLabel(label);
+    }
+
+    // Context prompt at the till.
+    if (!playerFrozen && !paused && tillStation.isPlayerInside(player.position())) {
+      const ready = customers?.getTillCustomer();
+      hud.prompt.hidden = false;
+      hud.prompt.textContent = ready ? `E — Serve ${ready.customer.name}` : "Waiting for the next customer…";
+    } else {
+      hud.prompt.hidden = true;
+    }
+    hud.banner.hidden = !(dayOver && customers?.storeEmpty() && !summaryOpen && !playerFrozen);
+    renderChangePanel(cameraMode === "till" ? (machine?.changeStatus() ?? null) : null);
+
     syncHoverCandidates();
-    camera.position.set(player.position().x, eyeHeightM(), player.position().z);
-    camera.rotation.set(player.pitch(), player.yaw(), 0); // order stays YXZ
-    // Raycast after the camera transform is final so hits match the render.
+    updateCamera(dt);
     updateHover();
     renderer.render(scene, camera);
-    // After the camera transform is final, glue the machine screen DOM to the
-    // machine's world position (projection uses the freshly-rendered camera).
-    updateMachineScreen();
   };
   animate();
 }
 
-// Boot seam (Task 8): load the saved till cash before the first HUD render.
-// loadGame already returns null for corrupt/wrong-version saves; the
-// try/catch covers a storage that throws on access. Never throws — a bad
-// save boots the game with RM0.00.
-function loadSavedMoney(): number | null {
+function loadSavedGame(): { moneySen: number; day: number } | null {
   try {
-    return loadGame()?.moneySen ?? null;
+    return loadGame();
   } catch {
     return null;
   }
 }
 
-// Credit seam (Task 8): persist right after the tally update. A storage
-// failure must never reach the game loop or lose the in-memory sale.
-function persistMoney(moneySen: number): void {
-  try {
-    saveGame({ version: 1, moneySen });
-  } catch {
-    // Storage full/blocked — the sale still counts in memory.
-  }
+// ---------------------------------------------------------------------------
+// HUD: takings, clock, toasts, prompts, till key legend, closing banner
+// ---------------------------------------------------------------------------
+interface Hud {
+  money: HTMLElement;
+  clock: HTMLElement;
+  prompt: HTMLElement;
+  legend: HTMLElement;
+  resume: HTMLElement;
+  banner: HTMLElement;
+  change: HTMLElement;
+  toast: (text: string) => void;
 }
 
-function renderMoneyHud(moneySen: number): void {
-  const hud = document.getElementById("money-hud");
-  if (hud) hud.textContent = `Money: ${formatRinggit(moneySen)}`;
+function buildHud(): Hud {
+  const money = document.getElementById("money-hud") ?? document.body.appendChild(document.createElement("div"));
+  const clock = document.createElement("div");
+  clock.id = "clock-hud";
+  document.body.appendChild(clock);
+
+  const prompt = document.createElement("div");
+  prompt.id = "interact-prompt";
+  prompt.hidden = true;
+  document.body.appendChild(prompt);
+
+  const resume = document.getElementById("lock-hint") ?? document.body.appendChild(document.createElement("div"));
+  resume.textContent = "Click to resume walking";
+  resume.hidden = true;
+
+  const legend = document.createElement("div");
+  legend.id = "till-legend";
+  legend.hidden = true;
+  legend.innerHTML = `
+    <div class="legend-title">At the till</div>
+    <div><kbd>F</kbd> scan the item at the scanner</div>
+    <div><kbd>B</kbd> / <kbd>N</kbd> plastic bag + / −</div>
+    <div><kbd>C</kbd> cash · <kbd>Q</kbd> DuitNow QR · <kbd>K</kbd> card</div>
+    <div><kbd>0-9</kbd> cash received in sen · <kbd>X</kbd> exact</div>
+    <div>Click notes / coins in the drawer for change</div>
+    <div><kbd>Enter</kbd> confirm / hand over · <kbd>⌫</kbd> undo</div>
+    <div><kbd>D</kbd> drawer · <kbd>Esc</kbd> void the sale</div>
+    <div class="legend-foot">You can also click the POS keys.</div>`;
+  document.body.appendChild(legend);
+
+  const banner = document.createElement("div");
+  banner.id = "close-banner";
+  banner.hidden = true;
+  banner.innerHTML = `<b>Kedai tutup!</b> Everyone's served — press <kbd>C</kbd> to close up and count the drawer.`;
+  document.body.appendChild(banner);
+
+  const toastRoot = document.createElement("div");
+  toastRoot.id = "toasts";
+  document.body.appendChild(toastRoot);
+  const toast = (text: string): void => {
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = text;
+    toastRoot.appendChild(el);
+    window.setTimeout(() => el.classList.add("toast-out"), 3800);
+    window.setTimeout(() => el.remove(), 4300);
+  };
+  // Large read-out while counting change — the till screen is small from the drawer view.
+  const change = document.createElement("div");
+  change.id = "change-panel";
+  change.hidden = true;
+  change.innerHTML = `<div class="cp-row"><span>Change / Baki</span><b class="cp-due"></b></div>
+    <div class="cp-row"><span>On tray</span><b class="cp-tray"></b></div>
+    <div class="cp-hint"></div>`;
+  document.body.appendChild(change);
+  return { money, clock, prompt, legend, resume, banner, change, toast };
 }
 
-// Transient "click the canvas to look around" pill, shown after the till
-// closes (covers both the Esc-abandon and the timer-based thank-you paths).
-// Auto-hides after ~3 s. A re-show resets the hide timer.
-let lockHintTimer: number | undefined;
-function showLockHint(): void {
-  const hint = document.getElementById("lock-hint");
-  if (!hint) return;
-  hint.hidden = false;
-  window.clearTimeout(lockHintTimer);
-  lockHintTimer = window.setTimeout(() => {
-    hint.hidden = true;
-  }, 3000);
+// ---------------------------------------------------------------------------
+// Start / pause menu
+// ---------------------------------------------------------------------------
+interface Menu {
+  root: HTMLDivElement;
+  onPlay: (() => void) | null;
+  show(title: string): void;
+  setDay(day: number): void;
+}
+
+function buildMenu(initial: Settings, onChange: (s: Settings) => void): Menu {
+  const root = document.createElement("div");
+  root.id = "menu";
+  root.innerHTML = `
+    <div class="menu-card">
+      <div class="menu-store">${STORE_NAME}</div>
+      <div class="menu-title">Selamat datang!</div>
+      <div class="menu-sub"></div>
+      <button class="menu-play" type="button">Mula kerja — Start shift</button>
+      <div class="menu-grid">
+        <div class="menu-controls">
+          <div class="menu-h">Controls</div>
+          <div><kbd>WASD</kbd> walk · mouse to look</div>
+          <div><kbd>E</kbd> serve the customer at the till</div>
+          <div>Aim at a shelf item to see its price</div>
+          <div><kbd>Esc</kbd> pause</div>
+        </div>
+        <div class="menu-settings">
+          <div class="menu-h">Settings</div>
+          <label>Mouse sensitivity <input data-k="sensitivity" type="range" min="0.3" max="2" step="0.05"></label>
+          <label>Volume <input data-k="volume" type="range" min="0" max="1" step="0.05"></label>
+          <label class="menu-check"><input data-k="changeHint" type="checkbox"> Show suggested change</label>
+          <label>Shift length
+            <select data-k="shiftMinutes">
+              <option value="8">8 min (busy)</option>
+              <option value="12">12 min</option>
+              <option value="20">20 min (relaxed)</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(root);
+  const title = root.querySelector<HTMLDivElement>(".menu-title")!;
+  const sub = root.querySelector<HTMLDivElement>(".menu-sub")!;
+  const play = root.querySelector<HTMLButtonElement>(".menu-play")!;
+  const sens = root.querySelector<HTMLInputElement>('[data-k="sensitivity"]')!;
+  const vol = root.querySelector<HTMLInputElement>('[data-k="volume"]')!;
+  const hint = root.querySelector<HTMLInputElement>('[data-k="changeHint"]')!;
+  const shift = root.querySelector<HTMLSelectElement>('[data-k="shiftMinutes"]')!;
+  sens.value = String(initial.sensitivity);
+  vol.value = String(initial.volume);
+  hint.checked = initial.changeHint;
+  shift.value = String(initial.shiftMinutes);
+  const emit = (): void => {
+    onChange({
+      sensitivity: Number(sens.value),
+      volume: Number(vol.value),
+      changeHint: hint.checked,
+      shiftMinutes: Number(shift.value) as Settings["shiftMinutes"],
+    });
+  };
+  for (const el of [sens, vol, hint, shift]) el.addEventListener("input", emit);
+  const menu: Menu = {
+    root,
+    onPlay: null,
+    show(text: string) {
+      title.textContent = text;
+      play.textContent = text === "Paused" ? "Sambung — Resume" : "Mula kerja — Start shift";
+      root.hidden = false;
+    },
+    setDay(day: number) {
+      sub.textContent = `Hari ${day} · You're on the till today, 9:00 AM – 10:00 PM.`;
+    },
+  };
+  play.addEventListener("click", () => menu.onPlay?.());
+  return menu;
+}
+
+// ---------------------------------------------------------------------------
+// End-of-shift summary
+// ---------------------------------------------------------------------------
+interface DrawerCount {
+  floatSen: number;
+  topUpsSen: number;
+  cashSalesSen: number;
+  expectedSen: number;
+  countedSen: number;
+}
+
+interface Summary {
+  root: HTMLDivElement;
+  onNextDay: (() => void) | null;
+  render(day: number, s: ShiftStats, d: DrawerCount): void;
+}
+
+function buildSummary(): Summary {
+  const root = document.createElement("div");
+  root.id = "summary";
+  root.hidden = true;
+  document.body.appendChild(root);
+  const api: Summary = {
+    root,
+    onNextDay: null,
+    render(day, s, d) {
+      const rm = formatRinggit;
+      const balanced = d.countedSen === d.expectedSen;
+      const accuracy = s.changeGiven === 0 ? "—" : `${s.changeFirstTry} / ${s.changeGiven}`;
+      root.innerHTML = `
+        <div class="summary-card">
+          <div class="menu-store">${STORE_NAME}</div>
+          <div class="menu-title">Hari ${day} selesai!</div>
+          <div class="summary-grid">
+            <div class="summary-col">
+              <div class="menu-h">Shift</div>
+              <div class="srow"><span>Customers served</span><b>${s.customers}</b></div>
+              <div class="srow"><span>Total sales</span><b>${rm(s.salesSen)}</b></div>
+              <div class="srow"><span>Cash</span><b>${s.byMethod.cash.count} · ${rm(s.byMethod.cash.sen)}</b></div>
+              <div class="srow"><span>DuitNow QR</span><b>${s.byMethod.qr.count} · ${rm(s.byMethod.qr.sen)}</b></div>
+              <div class="srow"><span>Card</span><b>${s.byMethod.card.count} · ${rm(s.byMethod.card.sen)}</b></div>
+              <div class="srow"><span>Plastic bags sold</span><b>${s.bagsSold} · ${rm(s.bagsSold * 20)}</b></div>
+              <div class="srow"><span>Rounding (net)</span><b>${s.roundingSen >= 0 ? "+" : "−"}${rm(Math.abs(s.roundingSen))}</b></div>
+              <div class="srow"><span>Change right first time</span><b>${accuracy}</b></div>
+            </div>
+            <div class="summary-col">
+              <div class="menu-h">Drawer count</div>
+              <div class="srow"><span>Opening float</span><b>${rm(d.floatSen)}</b></div>
+              <div class="srow"><span>Supervisor top-ups</span><b>${rm(d.topUpsSen)}</b></div>
+              <div class="srow"><span>Cash sales</span><b>${rm(d.cashSalesSen)}</b></div>
+              <div class="srow total"><span>Expected</span><b>${rm(d.expectedSen)}</b></div>
+              <div class="srow total"><span>Counted</span><b>${rm(d.countedSen)}</b></div>
+              <div class="balanced ${balanced ? "ok" : "off"}">${balanced ? "✓ Drawer balanced — cun!" : `Off by ${rm(Math.abs(d.countedSen - d.expectedSen))}`}</div>
+            </div>
+          </div>
+          <button class="menu-play" type="button">Buka kedai — Hari ${day + 1}</button>
+        </div>`;
+      root.querySelector<HTMLButtonElement>(".menu-play")!.addEventListener("click", () => api.onNextDay?.());
+    },
+  };
+  return api;
 }
 
 // ---------------------------------------------------------------------------
 // Loading overlay (#loading): warm cream card, store name, status line and
-// progress bar. Built from JS so index.html (Task 1 skeleton) stays untouched;
-// hidden until showLoading() runs and removed after the fade-out.
+// progress bar. Hidden until showLoading() runs and removed after the fade.
 // ---------------------------------------------------------------------------
 interface LoadingOverlay {
   root: HTMLDivElement;
@@ -746,17 +952,13 @@ function createLoadingOverlay(): LoadingOverlay {
       text-transform: uppercase; color: #a1603a; margin-bottom: 6px;
     }
     #loading .loading-title { font-size: 30px; font-weight: 800; letter-spacing: 0.02em; }
-    #loading .loading-status {
-      margin-top: 14px; font-size: 14px; color: #6d5a41; min-height: 1.4em;
-    }
+    #loading .loading-status { margin-top: 14px; font-size: 14px; color: #6d5a41; min-height: 1.4em; }
     #loading .loading-track {
       margin: 10px auto 0; width: 240px; height: 10px;
-      background: #e2d3b4; border: 1px solid #caa46a; border-radius: 999px;
-      overflow: hidden;
+      background: #e2d3b4; border: 1px solid #caa46a; border-radius: 999px; overflow: hidden;
     }
     #loading .loading-fill {
-      height: 100%; width: 0%; background: #b45309; border-radius: 999px;
-      transition: width 0.25s ease;
+      height: 100%; width: 0%; background: #b45309; border-radius: 999px; transition: width 0.25s ease;
     }
   `;
   document.head.appendChild(style);
@@ -768,8 +970,8 @@ function createLoadingOverlay(): LoadingOverlay {
   root.setAttribute("aria-live", "polite");
   root.innerHTML = `
     <div class="loading-card">
-      <div class="loading-store">Mini Market</div>
-      <div class="loading-title">KEDAI RUNCIT</div>
+      <div class="loading-store">Pasaraya</div>
+      <div class="loading-title">${STORE_NAME}</div>
       <div class="loading-status">Menyediakan kedai…</div>
       <div class="loading-track"><div class="loading-fill"></div></div>
     </div>
