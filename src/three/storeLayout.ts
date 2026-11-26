@@ -8,7 +8,7 @@
 //   z = -7   [storeroom door]  [entrance doorway]  [Grab pickup counter]
 //   z ≈ -5   [aisle row A tall] … [aisle row D tall]   rows run along Z,
 //   z ≈  0   aisle ends                              length ROW_LENGTH_M
-//   z ≈  1.8  KEDAI RUNCIT sign (hanging)
+//   z ≈  1.8  PASARAYA MESRA sign (hanging)
 //   z ≈  3.1  checkout counter (till) facing the spawn
 //   z = +4   spawn (see FpsController) — faces the till
 //   z ≈  5.4 [break bench, bottom-left]
@@ -68,7 +68,7 @@ const MAT_W_M = 0.5;
 const MAT_H_M = 0.025;
 const MAT_D_M = 0.42;
 
-// KEDAI RUNCIT sign, hanging from the ceiling above/behind the till.
+// PASARAYA MESRA sign, hanging from the ceiling above/behind the till.
 const KEDAI_SIGN_HEIGHT_M = 0.995;        // matches the kedaiSign plane built in assets.ts
 const SIGN_ROD_RADIUS_M = 0.02;
 
@@ -396,7 +396,7 @@ function buildCheckoutCounter(
   colliders.push(footprintCollider(counter));
 }
 
-// KEDAI RUNCIT sign hanging behind/above the till. Inert.
+// PASARAYA MESRA sign hanging behind/above the till. Inert.
 function buildKedaiSign(scene: THREE.Scene, bundle: AssetBundle): void {
   const sign = bundle.signage.kedaiSign.clone(true);
   sign.position.set(TILL_X, TILL_SIGN_Y, TILL_SIGN_Z);
@@ -565,7 +565,7 @@ export function buildStore(scene: THREE.Scene, bundle: AssetBundle): Aabb[] {
   // One InstancedMesh per SKU from the placements collected above (all rows).
   addInstancedProducts(scene, bundle, stock.placementsBySku);
 
-  // Till + hanging KEDAI RUNCIT sign (bottom-centre).
+  // Till + hanging PASARAYA MESRA sign (bottom-centre).
   buildCheckoutCounter(scene, bundle, colliders);
   buildKedaiSign(scene, bundle);
 

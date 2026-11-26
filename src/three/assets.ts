@@ -8,7 +8,8 @@
 //      shipped in public/assets/furniture-kit/) and fall back to
 //      procedural primitives per-asset when the file is missing or fails
 //      to load. The game therefore boots with zero downloads as well.
-//   3. Signage (KEDAI RUNCIT / Grab pick-up) and customers are procedural.
+//   3. Signage (store sign / Grab pick-up) is procedural; customers are
+//      built by src/game/customerRig.ts.
 //
 // Everything is built locally — no runtime network requests to external
 // hosts. loadAssets() never throws; on any failure it resolves with the
@@ -16,13 +17,13 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { PRODUCTS } from "../data/products";
+import { FALLBACK_PACK_SPEC, PACK_SPECS, type PackSpec } from "../data/packSpecs";
 
 export interface AssetBundle {
   products: Map<string, THREE.Group>;
   shelves: THREE.Group[];
   counter: THREE.Group;
   signage: { kedaiSign: THREE.Mesh; grabSign: THREE.Mesh };
-  customers: THREE.Group[];
 }
 
 /** Stage reporter for the loading overlay (label + 0..1 progress). */
@@ -172,96 +173,16 @@ function drawBarcode(
 }
 
 // ---------------------------------------------------------------------------
-// Product packaging specs — Malaysian flavor, packaging-inspired colors.
+// Product packs — geometry + colours come from the shared pure table in
+// src/data/packSpecs.ts (also read by the planogram).
 // ---------------------------------------------------------------------------
-interface ProductSpec {
-  shape: "box" | "tin" | "tray";
-  /** Box/tray: [w, h, d]; tin: [diameter, height, diameter]. */
-  size: [number, number, number];
-  body: string;
-  side: string;
-  accent: string;
-  brandFg: string;
-  brand: string;
-  variant: string;
-  detail: string;
-}
-
-const PRODUCT_SPECS: Record<string, ProductSpec> = {
-  "milo-300g": {
-    shape: "tin", size: [0.11, 0.145, 0.11],
-    body: "#1f6f3f", side: "#175733", accent: "#6b3a1e", brandFg: "#f7ead7",
-    brand: "MILO", variant: "MALTED MILK", detail: "TIN 300g",
-  },
-  "maggi-curry": {
-    shape: "box", size: [0.16, 0.21, 0.085],
-    body: "#d42a1e", side: "#b02015", accent: "#ffd21e", brandFg: "#fff8ea",
-    brand: "MAGGI", variant: "KARI · CURRY", detail: "NOODLES 5-PCS",
-  },
-  "roti-canai-frozen": {
-    shape: "box", size: [0.2, 0.055, 0.28],
-    body: "#e8762d", side: "#c2571d", accent: "#1d4f91", brandFg: "#fff3df",
-    brand: "ROTI CANAI", variant: "FROZEN · 5PK", detail: "Halal",
-  },
-  "nasi-lemak-bungkus": {
-    shape: "box", size: [0.14, 0.125, 0.14],
-    body: "#2e7d32", side: "#215c25", accent: "#f5e9c8", brandFg: "#f5e9c8",
-    brand: "NASI LEMAK", variant: "BUNGKUS", detail: "Sambal · Telur",
-  },
-  "tens-egg": {
-    shape: "tray", size: [0.29, 0.085, 0.265],
-    body: "#8a6b45", side: "#6b5233", accent: "#5c4630", brandFg: "#f7ead7",
-    brand: "TENS EGG", variant: "TRAY 10", detail: "Telur Segar",
-  },
-  "kuih-bahulu": {
-    shape: "box", size: [0.15, 0.1, 0.15],
-    body: "#e08bb0", side: "#b8618a", accent: "#a83d63", brandFg: "#fff0f5",
-    brand: "KUIH", variant: "BAHULU", detail: "12 PCS",
-  },
-  "susu-fullcream": {
-    shape: "box", size: [0.088, 0.23, 0.088],
-    body: "#2050a0", side: "#173c77", accent: "#ffffff", brandFg: "#ffffff",
-    brand: "SUSU", variant: "FULL CREAM", detail: "1 LITER",
-  },
-  "mee-hoon": {
-    shape: "box", size: [0.3, 0.05, 0.21],
-    body: "#f2c230", side: "#c99a1d", accent: "#b45309", brandFg: "#4a2c10",
-    brand: "MEE HOON", variant: "500g", detail: "Rice Vermicelli",
-  },
-  "telur-10pk": {
-    shape: "box", size: [0.27, 0.11, 0.2],
-    body: "#b98a52", side: "#8f683a", accent: "#7a5230", brandFg: "#fdf2df",
-    brand: "TELUR AYAM", variant: "10 PK · MEDIUM", detail: "Telur Segar",
-  },
-  "kopi-3in1": {
-    shape: "box", size: [0.14, 0.19, 0.06],
-    body: "#c02a20", side: "#961f17", accent: "#f3e3c8", brandFg: "#fff6e6",
-    brand: "KOPI", variant: "3-IN-1 · 10PK", detail: "Kopi O · Gula · Susu",
-  },
-  "bicarbonate-250g": {
-    shape: "box", size: [0.085, 0.125, 0.05],
-    body: "#e8f0f2", side: "#c3cfd3", accent: "#2f6f9f", brandFg: "#1d3a4d",
-    brand: "SODA", variant: "BICARBONATE", detail: "250g",
-  },
-  "soap-bar": {
-    shape: "box", size: [0.095, 0.045, 0.07],
-    body: "#1f8f8a", side: "#146a66", accent: "#bfe8e4", brandFg: "#eafffc",
-    brand: "SABUN", variant: "SOAP BAR", detail: "Bar Soap",
-  },
-};
-
-const FALLBACK_SPEC: ProductSpec = {
-  shape: "box", size: [0.16, 0.2, 0.09],
-  body: "#7a5a36", side: "#5b4225", accent: "#caa46a", brandFg: "#fdf6e9",
-  brand: "PRODUK", variant: "", detail: "",
-};
 
 /**
  * Render a product label onto a canvas. Pack colors + accent pinstripe +
  * faux barcode only — every word of brand/variant/detail text has been
  * stripped (names are shown via the 3D hover tooltip instead).
  */
-function makeProductLabel(spec: ProductSpec, seed: string): THREE.CanvasTexture {
+function makeProductLabel(spec: PackSpec, seed: string): THREE.CanvasTexture {
   const width = 256;
   const height = 256;
   const [canvas, ctx] = makeCanvas(width, height);
@@ -288,35 +209,112 @@ function makeProductLabel(spec: ProductSpec, seed: string): THREE.CanvasTexture 
   return toTexture(canvas);
 }
 
+/**
+ * Wrap-around label for round packs (bottles, jars). Canvas y maps to pack
+ * height (top of canvas = top of pack): cap band, shoulder, label panel with
+ * accent stripes + barcode, base.
+ */
+function makeRoundLabel(spec: PackSpec, seed: string, capFrom: number, labelTo: number, labelFrom: number): THREE.CanvasTexture {
+  const size = 256;
+  const [canvas, ctx] = makeCanvas(size, size);
+  const y = (t: number): number => (1 - t) * size;
+  ctx.fillStyle = spec.body;
+  ctx.fillRect(0, 0, size, size);
+  // Cap / lid.
+  ctx.fillStyle = spec.side;
+  ctx.fillRect(0, 0, size, y(capFrom));
+  // Label panel.
+  const top = y(labelTo);
+  const bottom = y(labelFrom);
+  ctx.fillStyle = spec.accent;
+  ctx.fillRect(0, top, size, bottom - top);
+  ctx.fillStyle = spec.side;
+  ctx.fillRect(0, top + 6, size, 8);
+  ctx.fillRect(0, bottom - 14, size, 8);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(size - 80, bottom - 52, 64, 34);
+  ctx.clip();
+  drawBarcode(ctx, seed, size - 76, bottom - 50, 56, 30, contrastOn(spec.accent));
+  ctx.restore();
+  return toTexture(canvas);
+}
+
+/** Lathe profile sampled evenly in height so the texture's v = height fraction. */
+function latheProfile(radius: number, height: number, radiusAt: (t: number) => number): THREE.Vector2[] {
+  const samples = 30;
+  const points: THREE.Vector2[] = [];
+  for (let i = 0; i < samples; i += 1) {
+    const t = i / (samples - 1);
+    points.push(new THREE.Vector2(Math.max(0.0005, radiusAt(t) * radius), t * height));
+  }
+  return points;
+}
+
+function bottleRadius(t: number): number {
+  if (t < 0.03) return 0.2 + 0.8 * (t / 0.03);
+  if (t < 0.62) return 1;
+  if (t < 0.82) {
+    const u = (t - 0.62) / 0.2;
+    return 1 - 0.64 * (u * u * (3 - 2 * u));
+  }
+  if (t < 0.97) return 0.36;
+  return 0.36 * (1 - (t - 0.97) / 0.03);
+}
+
+function jarRadius(t: number): number {
+  if (t < 0.04) return 0.25 + 0.75 * (t / 0.04);
+  if (t < 0.8) return 1;
+  if (t < 0.84) return 0.94;
+  if (t < 0.97) return 0.98;
+  return 0.98 * (1 - (t - 0.97) / 0.03);
+}
+
 function buildProduct(productId: string, name: string): THREE.Group {
-  const spec = PRODUCT_SPECS[productId] ?? { ...FALLBACK_SPEC, brand: name.toUpperCase().slice(0, 22) };
+  const spec = PACK_SPECS[productId] ?? FALLBACK_PACK_SPEC;
   const group = new THREE.Group();
   group.name = `product:${productId}`;
   // Belt-and-braces identity: placement also tags each clone via tagProduct.
   group.userData.productId = productId;
+  group.userData.productName = name;
 
   const lambert = (color: string): THREE.MeshLambertMaterial =>
     new THREE.MeshLambertMaterial({ color, flatShading: true });
 
+  // NOTE: every pack is ONE child mesh — storeLayout instances children[0].
   if (spec.shape === "tin") {
     const [diameter, height] = spec.size;
     const radius = diameter / 2;
-    const sideLabel = makeProductLabel(spec, productId);
-    const sideMat = new THREE.MeshLambertMaterial({ map: sideLabel, flatShading: true });
-    const capMat = lambert(spec.accent);
-    const bodyMat = lambert(spec.side);
-    const tin = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, 20), [sideMat, capMat, bodyMat]);
+    const sideMat = new THREE.MeshLambertMaterial({ map: makeProductLabel(spec, productId), flatShading: true });
+    const tin = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius, radius, height, 20),
+      [sideMat, lambert(spec.accent), lambert(spec.side)],
+    );
     tin.position.y = height / 2;
     group.add(tin);
     return group;
   }
 
+  if (spec.shape === "bottle" || spec.shape === "jar") {
+    const [diameter, height] = spec.size;
+    const isBottle = spec.shape === "bottle";
+    const texture = isBottle
+      ? makeRoundLabel(spec, productId, 0.86, 0.58, 0.14)
+      : makeRoundLabel(spec, productId, 0.82, 0.74, 0.12);
+    const mesh = new THREE.Mesh(
+      new THREE.LatheGeometry(latheProfile(diameter / 2, height, isBottle ? bottleRadius : jarRadius), 16),
+      new THREE.MeshLambertMaterial({ map: texture }),
+    );
+    // Lathe geometry already stands on y = 0 — no lift.
+    group.add(mesh);
+    return group;
+  }
+
   const [width, height, depth] = spec.size;
   const sideMat = lambert(spec.side);
-  // Flat packs (roti, mee hoon, soap…) and trays read better from above —
+  // Flat packs (rice, mee hoon, soap…) and trays read better from above —
   // put the label on the top face instead of the thin front strip.
   const labelOnTop = spec.shape === "tray" || height < 0.08;
-  // One label canvas per box — reused on the top face when applicable.
   const labelMat = new THREE.MeshLambertMaterial({ map: makeProductLabel(spec, productId), flatShading: true });
   const topMat = labelOnTop ? labelMat : lambert(spec.body);
   const faceMat = labelOnTop ? sideMat : labelMat;
@@ -405,8 +403,8 @@ function buildKedaiSign(): THREE.Mesh {
   ctx.strokeRect(18, 18, 1024 - 36, 300 - 36);
   ctx.lineWidth = 3;
   ctx.strokeRect(38, 38, 1024 - 76, 300 - 76);
-  drawSpaced(ctx, "KEDAI RUNCIT", 512, 160, 900, 92, 16, FONT_STACK, SIGN_CREAM);
-  drawSpaced(ctx, "MINI MARKET · EST. 1987", 512, 234, 880, 30, 8, FONT_BODY, "#d8b878");
+  drawSpaced(ctx, "PASARAYA MESRA", 512, 160, 900, 92, 12, FONT_STACK, SIGN_CREAM);
+  drawSpaced(ctx, "SEREMBAN · SEJAK 1987", 512, 234, 880, 30, 8, FONT_BODY, "#d8b878");
 
   const texture = toTexture(canvas);
   const material = new THREE.MeshLambertMaterial({
@@ -417,7 +415,7 @@ function buildKedaiSign(): THREE.Mesh {
     side: THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.995), material);
-  mesh.name = "signage:kedai-runcit";
+  mesh.name = "signage:store-sign";
   return mesh;
 }
 
@@ -443,57 +441,6 @@ function buildGrabSign(): THREE.Mesh {
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.75), material);
   mesh.name = "signage:grab-pickup";
   return mesh;
-}
-
-// ---------------------------------------------------------------------------
-// Customers — capsule/low-poly figures, deterministic variants.
-// ---------------------------------------------------------------------------
-interface CustomerVariant {
-  body: string;
-  skin: string;
-  /** "none" | "songkok" (black cap) | "tudung" (headscarf). */
-  headwear: "none" | "songkok" | "tudung";
-  headwearColor: string;
-  scale: number;
-}
-
-const CUSTOMER_VARIANTS: CustomerVariant[] = [
-  { body: "#c96f4a", skin: "#8d5a3b", headwear: "none", headwearColor: "#2b2b2b", scale: 1.0 },
-  { body: "#4a6fa5", skin: "#6e4a2c", headwear: "songkok", headwearColor: "#1c1c1c", scale: 1.06 },
-  { body: "#7a4a6f", skin: "#a9714b", headwear: "tudung", headwearColor: "#d9c9a8", scale: 0.94 },
-];
-
-function buildCustomer(variant: CustomerVariant, index: number): THREE.Group {
-  const group = new THREE.Group();
-  group.name = `customer:${index}`;
-  const lambert = (color: string): THREE.MeshLambertMaterial =>
-    new THREE.MeshLambertMaterial({ color, flatShading: true });
-
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.52, 4, 10), lambert(variant.body));
-  body.position.y = 0.92;
-  group.add(body);
-
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.135, 12, 10), lambert(variant.skin));
-  head.position.y = 1.42;
-  group.add(head);
-
-  if (variant.headwear === "songkok") {
-    const songkok = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.125, 0.09, 12), lambert(variant.headwearColor));
-    songkok.position.y = 1.53;
-    group.add(songkok);
-  } else if (variant.headwear === "tudung") {
-    const tudung = new THREE.Mesh(new THREE.SphereGeometry(0.155, 12, 10), lambert(variant.headwearColor));
-    tudung.scale.set(1, 1.15, 1);
-    tudung.position.y = 1.45;
-    group.add(tudung);
-  } else {
-    const hair = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10, 0, Math.PI * 2, 0, Math.PI / 2), lambert("#241a12"));
-    hair.position.y = 1.45;
-    group.add(hair);
-  }
-
-  group.scale.setScalar(variant.scale);
-  return group;
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +504,7 @@ async function loadGltfGroup(url: string, targetHeightM: number): Promise<THREE.
 function buildEmergencyBundle(onStage?: AssetStageCallback): AssetBundle {
   const products = new Map<string, THREE.Group>();
   for (const product of PRODUCTS) {
-    const spec = PRODUCT_SPECS[product.id] ?? FALLBACK_SPEC;
+    const spec = PACK_SPECS[product.id] ?? FALLBACK_PACK_SPEC;
     const [width, height, depth] = spec.size;
     const group = new THREE.Group();
     group.name = `product:${product.id}`;
@@ -584,10 +531,9 @@ function buildEmergencyBundle(onStage?: AssetStageCallback): AssetBundle {
     shelves: [buildShelfProcedural(false), buildShelfProcedural(true)],
     counter: buildCounterProcedural(),
     signage: {
-      kedaiSign: plainSign(SIGN_WOOD_BG, 3.4, 0.995, "signage:kedai-runcit"),
+      kedaiSign: plainSign(SIGN_WOOD_BG, 3.4, 0.995, "signage:store-sign"),
       grabSign: plainSign(GRAB_GREEN, 1.6, 0.75, "signage:grab-pickup"),
     },
-    customers: CUSTOMER_VARIANTS.map((variant, index) => buildCustomer(variant, index)),
   };
 }
 
@@ -617,10 +563,9 @@ export async function loadAssets(onStage?: AssetStageCallback): Promise<AssetBun
 
     onStage?.("Menggantung papan tanda…", 0.85);
     const signage = { kedaiSign: buildKedaiSign(), grabSign: buildGrabSign() };
-    const customers = CUSTOMER_VARIANTS.map((variant, index) => buildCustomer(variant, index));
 
     onStage?.("Dibuka! Selamat datang…", 1);
-    return { products, shelves, counter, signage, customers };
+    return { products, shelves, counter, signage };
   } catch (error) {
     console.error("[assets] Unexpected failure — using plain emergency bundle.", error);
     return buildEmergencyBundle(onStage);

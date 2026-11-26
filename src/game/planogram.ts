@@ -16,20 +16,13 @@
  *   - row index 1 is the low archetype; tall rows stock 3 boards × 2 sides,
  *     the low row 1 board × 2 sides → 18 + 2 = 20 faces.
  *
- * Tables that are NOT importable were duplicated deliberately:
- *   - PRODUCT_SPECS (pack dimensions) lives in src/three/assets.ts but is not
- *     exported, so SKU_PACK_SIZE_M mirrors it and a cross-module test pins
- *     every SKU id here to the PRODUCTS catalog.
+ * Pack sizes and units-per-facing are derived from the shared pure table
+ * in src/data/packSpecs.ts (the same table the 3D pack builder reads).
  *
  * Planogram design (documented judgment calls, per the task brief):
- *   - PLANOGRAM keeps the brief's flat 10-list `string[][]` table (the brief's
- *     Interfaces block annotates it `Record<string, string[][]>`, but the same
- *     brief shows the concrete `string[][]` example and describes 10 lists
- *     wrapped onto 20 faces modulo `PLANOGRAM.length`). The given first-five
- *     entries per list are kept in their original order; two lists (2 and 3)
- *     were re-balanced and every list was extended so the greedy fill reaches
- *     ≥ 96 % of the face — the sparse 5-entry example lists fill only
- *     76–89 %. UNITS_WIDE / PACK_DEPTH_TWO_M are verbatim from the brief.
+ *   - PLANOGRAM is built from FACE_PLAN (one category group per face) by
+ *     fillFaceList: greedy cycling, then a 1 mm knapsack over the group +
+ *     small filler packs so every face reaches ≥ 96 % fill.
  *   - 20 faces are enumerated row-major (row → board → side) by
  *     FACE_ENUMERATION; faceIndex % PLANOGRAM.length selects the SKU list.
  *     sideIndex 0 = the front face (fills −z → +z), sideIndex 1 = the back
@@ -51,16 +44,11 @@
  *     with d × packDepth + (d − 1) × GAP_M ≤ FACE_HALF_M (0.25 m, board is
  *     0.5 m deep, centred on the row centre plane). PACK_DEPTH_TWO_M is kept
  *     verbatim from the brief for contract continuity but no longer drives
- *     depth. Per-SKU results: kopi-3in1 3, bicarbonate-250g 3, soap-bar 3;
- *     milo-300g 2, maggi-curry 2, susu-fullcream 2; roti-canai-frozen 1,
- *     nasi-lemak-bungkus 1, tens-egg 1, kuih-bahulu 1, telur-10pk 1,
- *     mee-hoon 1.
+ *     depth.
  *   - Any pack deeper than a half-board is placed 1-DEEP flush with the
  *     INNER edge on the row centre plane (x = rowX ± packDepth/2):
- *     roti-canai-frozen (0.28 m) and tens-egg (0.265 m) both overhang the
- *     board's front lip toward the customer and NEVER cross into the
- *     opposite face's half. (The review named roti-canai only, but the
- *     predicate packDepth > FACE_HALF_M covers tens-egg identically.)
+ *     roti-canai-frozen (0.28 m) overhangs the board's front lip toward the
+ *     customer and NEVER crosses into the opposite face's half.
  *   - Containment guarantee: normal rows sit at
  *     x_j = side × (FACE_HALF_M − packDepth/2 − j × (packDepth + GAP_M)),
  *     which keeps each row's inner face at x ≥ 0 relative to the row centre
@@ -68,8 +56,11 @@
  *     x = side × packDepth/2 (inner face exactly on the centre plane). The
  *     two faces of a double-sided board never share space. (Front row's
  *     outer face is flush with the board lip.)
- *   - Fill ratio for the tables above: 96.4 %–100 % (see tests).
+ *   - Fill ratio for the tables above: 97.5 %–100 % (see tests).
  */
+import { PRODUCTS } from "../data/products";
+import { FALLBACK_PACK_SPEC, PACK_SPECS, unitsWideFor } from "../data/packSpecs";
+
 // ---------------------------------------------------------------------------
 // Interfaces (task-brief contract).
 // ---------------------------------------------------------------------------
@@ -139,62 +130,117 @@ export const ROW_BOARD_COUNTS: readonly number[] = [
 const FIT_EPSILON_M = 1e-6;
 
 // ---------------------------------------------------------------------------
-// Pack sizes per SKU, [width, height, depth] in metres.
-// Mirrors PRODUCT_SPECS in src/three/assets.ts (not exported there); the
-// cross-module tests pin every id to the PRODUCTS catalog.
+// Pack sizes + units per facing — derived from the shared pure pack table
+// (src/data/packSpecs.ts), so the planogram never drifts from the 3D packs.
 // ---------------------------------------------------------------------------
-export const SKU_PACK_SIZE_M: Record<string, readonly [number, number, number]> = {
-  "milo-300g": [0.11, 0.145, 0.11],
-  "maggi-curry": [0.16, 0.21, 0.085],
-  "roti-canai-frozen": [0.2, 0.055, 0.28],
-  "nasi-lemak-bungkus": [0.14, 0.125, 0.14],
-  "tens-egg": [0.29, 0.085, 0.265],
-  "kuih-bahulu": [0.15, 0.1, 0.15],
-  "susu-fullcream": [0.088, 0.23, 0.088],
-  "mee-hoon": [0.3, 0.05, 0.21],
-  "telur-10pk": [0.27, 0.11, 0.2],
-  "kopi-3in1": [0.14, 0.19, 0.06],
-  "bicarbonate-250g": [0.085, 0.125, 0.05],
-  "soap-bar": [0.095, 0.045, 0.07],
-};
+export const SKU_PACK_SIZE_M: Record<string, readonly [number, number, number]> = Object.fromEntries(
+  PRODUCTS.map((p) => [p.id, (PACK_SPECS[p.id] ?? FALLBACK_PACK_SPEC).size]),
+);
 
-/** Units per SKU across a facing — narrow packs more, wide packs fewer. Verbatim from the brief. */
-export const UNITS_WIDE: Record<string, number> = {
-  "milo-300g": 6, "maggi-curry": 4, "roti-canai-frozen": 4, "nasi-lemak-bungkus": 5,
-  "tens-egg": 3, "kuih-bahulu": 5, "susu-fullcream": 7, "mee-hoon": 3,
-  "telur-10pk": 3, "kopi-3in1": 5, "bicarbonate-250g": 6, "soap-bar": 6,
-};
+/** Units per SKU across a facing — narrow packs more, wide packs fewer. */
+export const UNITS_WIDE: Record<string, number> = Object.fromEntries(
+  PRODUCTS.map((p) => [p.id, unitsWideFor(PACK_SPECS[p.id] ?? FALLBACK_PACK_SPEC)]),
+);
 
 /**
- * Hand-authored planogram: 10 face lists → the 20 faces are assigned by
- * `PLANOGRAM[faceIndex % PLANOGRAM.length]` (modulo-wrap). The brief's
- * example first-five entries per list are kept in order and extended to
- * greedily fill ≥ 96 % of a 4.6 m face; lists 2 and 3 were re-balanced
- * (a ≥ 0.51 m facing could not fit their remaining space, so sparse entries
- * were swapped). All 12 catalog SKUs appear.
+ * Category plan, one SKU group per board face (20 faces, row-major — see
+ * FACE_ENUMERATION). Row 0 = drinks & dairy, row 1 (low) = rice / oil /
+ * sugar, row 2 = noodles, bread, condiments, snacks, row 3 = household,
+ * eggs and frozen.
  */
-export const PLANOGRAM: string[][] = [
-  // faceIndex 0 / 10
-  ["milo-300g", "kopi-3in1", "maggi-curry", "nasi-lemak-bungkus", "bicarbonate-250g", "telur-10pk"],
-  // faceIndex 1 / 11
-  ["susu-fullcream", "kuih-bahulu", "maggi-curry", "milo-300g", "soap-bar", "kopi-3in1"],
-  // faceIndex 2 / 12 (re-balanced: tens-egg dropped, susu-fullcream + soap-bar added)
-  ["telur-10pk", "roti-canai-frozen", "kopi-3in1", "bicarbonate-250g", "susu-fullcream", "soap-bar"],
-  // faceIndex 3 / 13 (re-balanced: nasi-lemak/soap-bar dropped, tens-egg + roti-canai added)
-  ["mee-hoon", "telur-10pk", "tens-egg", "kopi-3in1", "roti-canai-frozen"],
-  // faceIndex 4 / 14
-  ["susu-fullcream", "maggi-curry", "milo-300g", "kuih-bahulu", "nasi-lemak-bungkus", "kopi-3in1"],
-  // faceIndex 5 / 15
-  ["kopi-3in1", "kuih-bahulu", "roti-canai-frozen", "bicarbonate-250g", "maggi-curry", "nasi-lemak-bungkus"],
-  // faceIndex 6 / 16
-  ["bicarbonate-250g", "nasi-lemak-bungkus", "tens-egg", "soap-bar", "telur-10pk", "maggi-curry"],
-  // faceIndex 7 / 17
-  ["milo-300g", "susu-fullcream", "kopi-3in1", "maggi-curry", "kuih-bahulu", "nasi-lemak-bungkus"],
-  // faceIndex 8 / 18
-  ["tens-egg", "maggi-curry", "bicarbonate-250g", "milo-300g", "kopi-3in1", "nasi-lemak-bungkus"],
-  // faceIndex 9 / 19 (re-balanced: nasi-lemak/soap-bar dropped, tens-egg + mee-hoon added)
-  ["roti-canai-frozen", "kuih-bahulu", "telur-10pk", "tens-egg", "mee-hoon"],
+const FACE_PLAN: readonly (readonly string[])[] = [
+  // Row 0 (x = −6.75, tall): beverages & dairy
+  ["isotonic-1-5l", "mineral-1-5l", "sirap-ros-2l"],
+  ["mineral-1-5l", "isotonic-1-5l", "soya-1l"],
+  ["milo-400g", "kopi-3in1", "teh-tarik-3in1"],
+  ["susu-fullcream", "soya-1l", "susu-pekat"],
+  ["kopi-3in1", "teh-tarik-3in1", "milo-400g", "susu-pekat"],
+  ["butter-250g", "susu-pekat", "milo-400g"],
+  // Row 1 (x = −2.25, low): heavy staples
+  ["beras-5kg", "minyak-2kg", "gula-1kg"],
+  ["beras-5kg", "tepung-1kg", "garam-500g", "minyak-2kg"],
+  // Row 2 (x = 2.25, tall): noodles, bread, condiments, snacks
+  ["maggi-curry", "mi-ayam-5pk", "mee-hoon"],
+  ["roti-putih", "kaya-pandan", "kuih-bahulu", "nasi-lemak-bungkus"],
+  ["kicap-manis", "sos-cili", "sambal-bilis"],
+  ["sardin-425g", "belacan-250g", "ikan-bilis-200g"],
+  ["cream-crackers", "keropok-ikan", "kuih-bahulu"],
+  ["maggi-curry", "mi-ayam-5pk", "roti-canai-frozen"],
+  // Row 3 (x = 6.75, tall): household, eggs, frozen
+  ["detergent-1-8kg", "tisu-tandas-10"],
+  ["tisu-tandas-10", "pencuci-pinggan", "detergent-1-8kg"],
+  ["telur-30-tray", "telur-10pk", "roti-canai-frozen"],
+  ["soap-bar", "ubat-gigi", "bicarbonate-250g", "pencuci-pinggan"],
+  ["gula-1kg", "tepung-1kg", "garam-500g", "minyak-2kg"],
+  ["soap-bar", "ubat-gigi", "bicarbonate-250g", "keropok-ikan"],
 ];
+
+/** Small packs allowed to top up a face's last gap. */
+const FILLER_SKUS: readonly string[] = [
+  "soap-bar", "bicarbonate-250g", "garam-500g", "susu-pekat", "belacan-250g", "ubat-gigi",
+];
+
+function facingWidthM(skuId: string): number {
+  return UNITS_WIDE[skuId] * SKU_PACK_SIZE_M[skuId][0];
+}
+
+/**
+ * Turn a face's SKU group into a list the greedy fill packs to ≥ 96 %:
+ * cycle the group greedily until ~2.6 m remains, then solve the tail as a
+ * tiny unbounded knapsack (1 mm resolution) over the group + filler packs.
+ * Every chosen facing fits by construction, so computeFacings reproduces it.
+ */
+function fillFaceList(group: readonly string[]): string[] {
+  const list: string[] = [];
+  let cursor = 0;
+  const TAIL_M = 2.6;
+  let index = 0;
+  while (FACE_USABLE_M - cursor > TAIL_M) {
+    const sku = group[index % group.length];
+    index += 1;
+    list.push(sku);
+    cursor += facingWidthM(sku) + FACING_GAP_M;
+  }
+  // Capacity includes the trailing gap the last facing doesn't need.
+  const candidates = [...new Set([...group, ...FILLER_SKUS])];
+  const capacityMm = Math.floor((FACE_USABLE_M - cursor + FACING_GAP_M) * 1000 + 1e-6);
+  const weights = candidates.map((sku) => Math.ceil((facingWidthM(sku) + FACING_GAP_M) * 1000 - 1e-6));
+  const best = new Array<number>(capacityMm + 1).fill(0);
+  const choice = new Array<number>(capacityMm + 1).fill(-1);
+  for (let c = 1; c <= capacityMm; c += 1) {
+    best[c] = best[c - 1];
+    choice[c] = -2; // inherit from c − 1
+    for (let k = 0; k < candidates.length; k += 1) {
+      const w = weights[k];
+      if (w <= c && best[c - w] + w > best[c]) {
+        best[c] = best[c - w] + w;
+        choice[c] = k;
+      }
+    }
+  }
+  const tail: string[] = [];
+  let c = capacityMm;
+  while (c > 0) {
+    const k = choice[c];
+    if (k === -2) {
+      c -= 1;
+      continue;
+    }
+    if (k < 0) break;
+    tail.push(candidates[k]);
+    c -= weights[k];
+  }
+  // Group SKUs first, fillers last — reads tidier on the shelf.
+  const isFiller = (sku: string): number => (group.includes(sku) ? 0 : 1);
+  tail.sort((a, b) => isFiller(a) - isFiller(b));
+  return [...list, ...tail];
+}
+
+/**
+ * The planogram: one list per board face (faceIndex % PLANOGRAM.length), each
+ * packed to ≥ MIN_FACE_FILL_RATIO by fillFaceList. All catalog SKUs appear.
+ */
+export const PLANOGRAM: string[][] = FACE_PLAN.map(fillFaceList);
 
 // ---------------------------------------------------------------------------
 // Face enumeration (deterministic, row-major).
