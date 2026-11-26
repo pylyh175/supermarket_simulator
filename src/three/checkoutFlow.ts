@@ -173,6 +173,8 @@ export class CheckoutFlow {
    * "plip" cue here; audio stays out of the 3D module.
    */
   onItemPlaced: (() => void) | null = null;
+  /** Fired when the customer reaches into the basket for the next pack. */
+  onItemLaunched: (() => void) | null = null;
 
   private active = false;
   private basket: CheckoutBasketItem[] = [];
@@ -383,6 +385,19 @@ export class CheckoutFlow {
     this.toteGroup.visible = false;
   }
 
+  /** World point on the belt's scan line (scanner laser target). */
+  scanPoint(target: THREE.Vector3): THREE.Vector3 {
+    return target.copy(this.scanLine.position).setY(this.scanLine.position.y + 0.05);
+  }
+
+  /** The customer took the bag: empty it for the next sale. */
+  clearBag(): void {
+    if (this.bagContent) {
+      this.scene.remove(this.bagContent);
+      this.bagContent = null;
+    }
+  }
+
   /** Items that have been lifted into the bag this sale. */
   baggedCount(): number {
     return this.bagged;
@@ -409,6 +424,7 @@ export class CheckoutFlow {
 
     const index = this.nextPlaceIndex;
     this.startFlight(this.basket[index], index);
+    this.onItemLaunched?.();
     this.nextPlaceIndex += 1;
     this.placeTimer = PLACE_INTERVAL_S;
   }
