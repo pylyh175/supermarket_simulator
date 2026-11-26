@@ -341,14 +341,24 @@ kbd {
 .void-card { max-width: 380px; }
 .void-title { font-size: 22px; font-weight: 800; }
 .void-body { color: #6d5a41; margin: 6px 0 14px; }
-.void-actions { display: flex; justify-content: center; gap: 18px; font-weight: 700; }
-.void-actions b {
-  display: inline-block;
-  padding: 0 7px;
-  border: 1px solid #b89a72;
-  border-radius: 5px;
+.void-actions { display: flex; justify-content: center; gap: 14px; }
+.void-actions button {
+  font: 800 15px var(--ui-font);
+  border-radius: 999px;
+  padding: 9px 22px;
+  cursor: pointer;
+  border: 2px solid #b89a72;
   background: #fffaf0;
-  margin-right: 4px;
+  color: var(--ink);
+}
+.void-actions .void-yes { background: #8a3b2a; border-color: #8a3b2a; color: #fff8ea; }
+.void-actions button:hover { filter: brightness(1.08); }
+.void-actions kbd {
+  font: 700 11px var(--ui-font);
+  padding: 0 5px;
+  margin-left: 4px;
+  border: 1px solid #b89a72;
+  border-radius: 4px;
 }
 
 #receipt-card {

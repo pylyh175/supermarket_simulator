@@ -4,11 +4,18 @@
 //   • a monitor whose screen is a CanvasTexture in the world (occluded
 //     properly, crisp, receipt-style layout),
 //   • a green two-line customer display facing the customer,
-//   • POS keys (digits, quick tender, EXACT, ENTER, CLR, CASH/QR/CARD, BAG±),
+//   • a POS keypad (decorative — the till is worked with the mouse),
 //   • a cash drawer with clickable denomination slots fed by the drawer
-//     model (RM200 float, top-ups), a change tray and a tender spot,
+//     model (RM200 float, top-ups) that opens and closes by itself, and a
+//     change tray (click a piece to put it back, the tray to hand it over),
+//   • a stack of plastic bags (click to add one; click a placed bag to
+//     remove it),
 //   • a DuitNow QR standee, a card terminal and a receipt printer,
-//   • a handheld scanner whose laser hits the belt's scan line.
+//   • a handheld scanner: click it to pick it up, then click the pack at the
+//     scan line (or a QR customer's phone) to scan it.
+//
+// The only keys at the till are Esc (void the sale). Payment is taken by
+// clicking what the customer holds out: cash, a card, or a phone pay code.
 //
 // Every money decision runs through the pure, tested session state machine
 // (src/register/session.ts). This module only animates and renders it.
@@ -23,7 +30,6 @@ import { formatRinggit } from "../register/money";
 import { makeChange } from "../register/change";
 import {
   addBag,
-  cancelPayment,
   confirmElectronic,
   createSession,
   dispense,
@@ -53,7 +59,6 @@ import {
   playDrawerClose,
   playDrawerOpen,
   playError,
-  playKey,
   playNote,
   playPrinter,
   playQrSuccess,
@@ -84,6 +89,14 @@ const MONITOR_H = 0.352;
 const MONITOR_Y = 1.25;
 const MONITOR_TILT = -0.3;
 
+// Handheld scanner: held at this world height under the cursor; a scan dips
+// it over the target for SCAN_SWEEP_S (the scan registers halfway through).
+const SCANNER_HOLD_Y = 1.15;
+const SCAN_SWEEP_S = 0.3;
+const SCAN_AIM_OFFSET = new THREE.Vector3(0, 0.1, 0.06);
+/** How close (m) the cursor ray must pass to the customer's hand to take payment. */
+const HAND_PICK_RADIUS_M = 0.11;
+
 const KEY_PITCH = 0.05;
 const KEY_SIZE = 0.044;
 const KEY_REST_Y = TOP_Y + 0.02;
@@ -112,35 +125,31 @@ const COIN_COLORS: Record<number, string> = {
 const DRAWER_NOTES = [5000, 2000, 1000, 500, 100];
 const DRAWER_COINS = [50, 20, 10, 5];
 
-type KeyId =
-  | "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "00"
-  | "CLR" | "ENTER" | "EXACT" | "Q10" | "Q20" | "Q50" | "Q100"
-  | "CASH" | "QR" | "CARD" | "BAG+" | "BAG-";
 
-const KEY_LAYOUT: { id: KeyId; label: string; col: number; row: number; w?: number; color: string }[] = [
-  { id: "7", label: "7", col: 0, row: 0, color: "#3a3328" },
-  { id: "8", label: "8", col: 1, row: 0, color: "#3a3328" },
-  { id: "9", label: "9", col: 2, row: 0, color: "#3a3328" },
-  { id: "Q10", label: "RM10", col: 3, row: 0, color: "#5b4a2a" },
-  { id: "Q20", label: "RM20", col: 4, row: 0, color: "#5b4a2a" },
-  { id: "CASH", label: "CASH", col: 5, row: 0, color: "#2e6b3a" },
-  { id: "4", label: "4", col: 0, row: 1, color: "#3a3328" },
-  { id: "5", label: "5", col: 1, row: 1, color: "#3a3328" },
-  { id: "6", label: "6", col: 2, row: 1, color: "#3a3328" },
-  { id: "Q50", label: "RM50", col: 3, row: 1, color: "#5b4a2a" },
-  { id: "Q100", label: "RM100", col: 4, row: 1, color: "#5b4a2a" },
-  { id: "QR", label: "QR", col: 5, row: 1, color: "#b0306a" },
-  { id: "1", label: "1", col: 0, row: 2, color: "#3a3328" },
-  { id: "2", label: "2", col: 1, row: 2, color: "#3a3328" },
-  { id: "3", label: "3", col: 2, row: 2, color: "#3a3328" },
-  { id: "EXACT", label: "EXACT", col: 3, row: 2, color: "#5b4a2a" },
-  { id: "BAG+", label: "BAG+", col: 4, row: 2, color: "#3d5a80" },
-  { id: "CARD", label: "CARD", col: 5, row: 2, color: "#2a5a9a" },
-  { id: "0", label: "0", col: 0, row: 3, color: "#3a3328" },
-  { id: "00", label: "00", col: 1, row: 3, color: "#3a3328" },
-  { id: "CLR", label: "CLR", col: 2, row: 3, color: "#8a3b2a" },
-  { id: "ENTER", label: "ENTER", col: 3, row: 3, w: 2, color: "#2e6b3a" },
-  { id: "BAG-", label: "BAG−", col: 5, row: 3, color: "#3d5a80" },
+const KEY_LAYOUT: { label: string; col: number; row: number; w?: number; color: string }[] = [
+  { label: "7", col: 0, row: 0, color: "#3a3328" },
+  { label: "8", col: 1, row: 0, color: "#3a3328" },
+  { label: "9", col: 2, row: 0, color: "#3a3328" },
+  { label: "RM10", col: 3, row: 0, color: "#5b4a2a" },
+  { label: "RM20", col: 4, row: 0, color: "#5b4a2a" },
+  { label: "CASH", col: 5, row: 0, color: "#2e6b3a" },
+  { label: "4", col: 0, row: 1, color: "#3a3328" },
+  { label: "5", col: 1, row: 1, color: "#3a3328" },
+  { label: "6", col: 2, row: 1, color: "#3a3328" },
+  { label: "RM50", col: 3, row: 1, color: "#5b4a2a" },
+  { label: "RM100", col: 4, row: 1, color: "#5b4a2a" },
+  { label: "QR", col: 5, row: 1, color: "#b0306a" },
+  { label: "1", col: 0, row: 2, color: "#3a3328" },
+  { label: "2", col: 1, row: 2, color: "#3a3328" },
+  { label: "3", col: 2, row: 2, color: "#3a3328" },
+  { label: "EXACT", col: 3, row: 2, color: "#5b4a2a" },
+  { label: "BAG+", col: 4, row: 2, color: "#3d5a80" },
+  { label: "CARD", col: 5, row: 2, color: "#2a5a9a" },
+  { label: "0", col: 0, row: 3, color: "#3a3328" },
+  { label: "00", col: 1, row: 3, color: "#3a3328" },
+  { label: "CLR", col: 2, row: 3, color: "#8a3b2a" },
+  { label: "ENTER", col: 3, row: 3, w: 2, color: "#2e6b3a" },
+  { label: "BAG−", col: 5, row: 3, color: "#3d5a80" },
 ];
 
 export interface SaleResult {
@@ -170,7 +179,18 @@ interface TrayPiece {
   mesh: THREE.Object3D;
 }
 
-type PickHit = { kind: "key"; id: KeyId } | { kind: "slot"; denom: number } | { kind: "tray" } | { kind: "drawer" };
+type PickHit =
+  | { kind: "slot"; denom: number }
+  | { kind: "tray" }
+  | { kind: "trayPiece"; index: number }
+  | { kind: "scanner" }
+  | { kind: "bagStack" }
+  | { kind: "bag" }
+  | { kind: "payment" }
+  | { kind: "item"; mesh: THREE.Object3D; ready: boolean };
+
+/** userData.pick tags on clickable stand parts. */
+type PickTag = "scanner" | "bagStack" | "bag" | "tray";
 
 // ---------------------------------------------------------------------------
 // Piece meshes (notes / coins) — geometry + material cached per denomination
@@ -286,18 +306,26 @@ export class CashierMachine {
 
   // Parts
   private readonly drawerGroup = new THREE.Group();
-  private drawerFront: THREE.Mesh | null = null;
   private readonly slotHits = new Map<number, THREE.Mesh>();
   private readonly slotStacks = new Map<number, THREE.Group>();
-  private readonly keyMeshes = new Map<KeyId, THREE.Mesh>();
-  private readonly keyMats = new Map<KeyId, THREE.MeshLambertMaterial>();
   private readonly trayAnchor = new THREE.Vector3(-0.235, TOP_Y + 0.008, 0.16);
+  /** Where cash lands if no customer hand is available (fallback only). */
   private readonly tenderAnchor = new THREE.Vector3(-0.15, TOP_Y + 0.004, -0.19);
   private readonly trayHit: THREE.Mesh;
   private readonly receiptPaper: THREE.Mesh;
   private readonly laser: THREE.Line;
   private readonly laserPositions = new Float32Array(6);
   private readonly scannerTip = new THREE.Object3D();
+  private readonly gun = new THREE.Group();
+  private readonly holster: THREE.Mesh;
+  private readonly gunRestPos = new THREE.Vector3();
+  private readonly gunRestQuat = new THREE.Quaternion();
+  // Lens down-forward, turned toward the belt on the cashier's left.
+  private readonly gunHeldQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.8, 0.5, 0, "YXZ"));
+  private readonly holdPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -SCANNER_HOLD_Y);
+  private readonly bagStack: THREE.Group;
+  private readonly placedBagGeo: THREE.BufferGeometry[];
+  private readonly placedBagMat = lambert("#f4f4f2");
   private readonly voidPrompt: HTMLDivElement;
   private readonly receiptCard: HTMLDivElement;
 
@@ -308,12 +336,10 @@ export class CashierMachine {
   private drawerZ = 0;
   private session: Session | null = null;
   private avatar: CustomerAvatar | null = null;
-  /** Digits keyed for the cash tender, in sen ("2030" = RM20.30). */
-  private entry = "";
   private message = "";
   private messageIsError = false;
   private tray: TrayPiece[] = [];
-  private tenderPieces: THREE.Object3D[] = [];
+  private placedBags: THREE.Group[] = [];
   private flights: Flight[] = [];
   private timers: Timer[] = [];
   private laserS = 0;
@@ -321,13 +347,18 @@ export class CashierMachine {
   private hovered: THREE.MeshLambertMaterial | null = null;
   private hoveredSlot: THREE.Mesh | null = null;
   private voidOpen = false;
-  private waitingElectronic = false;
   private finishing = false;
-  private tenderHanded = false;
+  private scannerHeld = false;
+  /** Stand-local point the held scanner follows (under the cursor). */
+  private readonly gunTarget = new THREE.Vector3();
+  /** > 0 while the scanner dips over a target. */
+  private scanS = 0;
+  private readonly scanAim = new THREE.Vector3();
+  /** The customer is holding out cash / card / phone, waiting for a click. */
+  private paymentOffered = false;
   private clockLabel = "";
   private receiptTimers: number[] = [];
   private readonly scratch = new THREE.Vector3();
-  private readonly scratch2 = new THREE.Vector3();
 
   constructor(scene: THREE.Scene, opts: CashierMachineOptions) {
     this.opts = opts;
@@ -351,7 +382,12 @@ export class CashierMachine {
     this.buildQrStand();
     this.buildCardTerminal();
     this.receiptPaper = this.buildPrinter();
-    this.buildScanner();
+    this.holster = this.buildScanner();
+    this.bagStack = this.buildBagStack();
+    this.placedBagGeo = [
+      new THREE.BoxGeometry(0.06, 0.08, 0.045).translate(0, 0.04, 0),
+      new THREE.TorusGeometry(0.016, 0.003, 4, 8, Math.PI).translate(0, 0.08, 0),
+    ];
 
     const laserGeo = new THREE.BufferGeometry();
     laserGeo.setAttribute("position", new THREE.BufferAttribute(this.laserPositions, 3));
@@ -362,7 +398,7 @@ export class CashierMachine {
     scene.add(this.group, this.laser);
     this.group.updateMatrixWorld(true);
 
-    this.voidPrompt = buildVoidPrompt();
+    this.voidPrompt = buildVoidPrompt((yes) => this.answerVoid(yes));
     this.receiptCard = buildReceiptCard();
     this.refreshDrawerStacks();
     this.drawScreen();
@@ -446,11 +482,12 @@ export class CashierMachine {
     this.clearSaleVisuals();
     this.avatar = avatar;
     this.session = createSession(avatar.customer.basket);
-    this.entry = "";
     this.finishing = false;
-    this.waitingElectronic = false;
-    this.tenderHanded = false;
-    this.setMessage("Scan each item as it reaches the scanner (F).");
+    this.paymentOffered = false;
+    this.scanS = 0;
+    this.setScannerHeld(false);
+    this.syncBags();
+    this.setMessage("Pick up the scanner, then click each item as it reaches the scan line.");
     avatar.setCarry(null);
     this.opts.checkout?.begin(avatar.customer);
     this.drawVfd("SELAMAT DATANG", STORE_NAME);
@@ -477,81 +514,90 @@ export class CashierMachine {
     if (yes) this.voidSale();
   }
 
-  /** Keyboard input while the till is open. Returns true when consumed. */
+  /** Keyboard input while the till is open: only Esc (void / cancel the void prompt). */
   handleKey(code: string): boolean {
-    if (this.voidOpen) {
-      if (code === "KeyY" || code === "Enter") this.answerVoid(true);
-      else if (code === "KeyN" || code === "Escape") this.answerVoid(false);
-      return true;
-    }
-    if (code === "Escape") {
-      this.requestVoid();
-      return true;
-    }
-    if (code === "KeyF") {
-      this.scan();
-      return true;
-    }
-    if (/^(Digit|Numpad)[0-9]$/.test(code)) {
-      this.press(code.slice(-1) as KeyId);
-      return true;
-    }
-    const map: Record<string, KeyId> = {
-      Enter: "ENTER",
-      NumpadEnter: "ENTER",
-      Backspace: "CLR",
-      Delete: "CLR",
-      KeyC: "CASH",
-      KeyQ: "QR",
-      KeyK: "CARD",
-      KeyB: "BAG+",
-      KeyN: "BAG-",
-      KeyX: "EXACT",
-    };
-    const id = map[code];
-    if (id) {
-      this.press(id);
-      return true;
-    }
-    if (code === "KeyD") {
-      this.toggleDrawer();
-      return true;
-    }
-    return false;
+    if (code !== "Escape") return false;
+    if (this.voidOpen) this.answerVoid(false);
+    else this.requestVoid();
+    return true;
   }
 
-  /** Mouse click (pointer unlocked) — keys, drawer slots, tray, drawer front. */
+  /** Mouse click (pointer unlocked) — scanner, belt pack, bags, customer's payment, drawer, tray. */
   click(raycaster: THREE.Raycaster): void {
-    if (!this.session || this.voidOpen) return;
+    if (!this.session || this.voidOpen || this.finishing) return;
     const hit = this.pick(raycaster);
     if (!hit) return;
-    if (hit.kind === "key") this.press(hit.id);
-    else if (hit.kind === "slot") this.pickFromDrawer(hit.denom);
-    else if (hit.kind === "tray") this.press("ENTER");
-    else this.toggleDrawer();
+    switch (hit.kind) {
+      case "scanner":
+        this.setScannerHeld(!this.scannerHeld);
+        if (this.scannerHeld) this.followCursor(raycaster);
+        this.setMessage(
+          !this.scannerHeld
+            ? "Scanner back in its cradle."
+            : this.session.phase === "scanning"
+              ? "Scanner in hand — click the item at the scan line."
+              : "Scanner in hand.",
+        );
+        return;
+      case "item":
+        this.scanItem(hit.mesh, hit.ready);
+        return;
+      case "bagStack":
+        this.changeBags(1);
+        return;
+      case "bag":
+        this.changeBags(-1);
+        return;
+      case "payment":
+        this.takePayment();
+        return;
+      case "slot":
+        this.pickFromDrawer(hit.denom);
+        return;
+      case "trayPiece":
+        this.returnTrayPiece(hit.index);
+        return;
+      case "tray":
+        this.handOverTray();
+    }
   }
 
-  /** Mouse hover — highlight what a click would press. Returns true over a target. */
-  hover(raycaster: THREE.Raycaster | null): boolean {
-    const hit = raycaster && this.session && !this.voidOpen ? this.pick(raycaster) : null;
+  /**
+   * Mouse move — the held scanner follows the cursor; highlight what a click
+   * would do. Returns the CSS cursor to show ("" = default).
+   */
+  hover(raycaster: THREE.Raycaster | null): string {
     if (this.hovered) this.hovered.emissive.setHex(0x000000);
     this.hovered = null;
     if (this.hoveredSlot) (this.hoveredSlot.material as THREE.MeshBasicMaterial).opacity = 0;
     this.hoveredSlot = null;
-    if (hit?.kind === "key") {
-      const m = this.keyMats.get(hit.id);
-      if (m) {
-        m.emissive.setHex(0x4a3600);
-        this.hovered = m;
-      }
-    } else if (hit?.kind === "slot") {
+    if (!raycaster || !this.session || this.voidOpen) return "";
+    if (this.scannerHeld) this.followCursor(raycaster);
+    const hit = this.finishing ? null : this.pick(raycaster);
+    if (!hit) return "";
+    if (hit.kind === "item") return hit.ready ? "pointer" : "not-allowed";
+    if (hit.kind === "slot") {
       const mesh = this.slotHits.get(hit.denom);
       if (mesh) {
         (mesh.material as THREE.MeshBasicMaterial).opacity = 0.3;
         this.hoveredSlot = mesh;
       }
     }
-    return hit !== null;
+    const mat =
+      hit.kind === "scanner"
+        ? this.holster.material
+        : hit.kind === "bagStack"
+          ? (this.bagStack.children[0] as THREE.Mesh).material
+          : hit.kind === "bag"
+            ? this.placedBagMat
+            : hit.kind === "tray"
+              ? this.trayHit.material
+              : null;
+    if (mat instanceof THREE.MeshLambertMaterial) {
+      mat.emissive.setHex(0x4a3600);
+      this.hovered = mat;
+    }
+    return "pointer";
   }
 
   update(dt: number): void {
@@ -567,6 +613,7 @@ export class CashierMachine {
     const target = this.drawerOpen ? DRAWER_OPEN_M : 0;
     this.drawerZ += (target - this.drawerZ) * Math.min(1, dt * 10);
     this.drawerGroup.position.z = DRAWER_BASE_Z + this.drawerZ;
+    this.updateScanner(dt);
     this.updateFlights(dt);
     if (this.laserS > 0) {
       this.laserS -= dt;
@@ -584,74 +631,79 @@ export class CashierMachine {
   }
 
   // -------------------------------------------------------------------------
-  // Actions
+  // Scanner
   // -------------------------------------------------------------------------
 
-  private press(id: KeyId): void {
-    const s = this.session;
-    if (!s || this.finishing) return;
-    this.animateKey(id);
-    playKey();
-    switch (id) {
-      case "BAG+":
-        this.changeBags(1);
-        return;
-      case "BAG-":
-        this.changeBags(-1);
-        return;
-      case "CASH":
-      case "QR":
-      case "CARD":
-        this.choosePayment(id === "CASH" ? "cash" : id === "QR" ? "qr" : "card");
-        return;
-      case "CLR":
-        this.clear();
-        return;
-      case "ENTER":
-        this.enter();
-        return;
-      case "EXACT":
-        if (!this.ensureCash()) return;
-        this.entry = String(this.session!.totalDueSen);
-        this.enter();
-        return;
-      case "Q10":
-      case "Q20":
-      case "Q50":
-      case "Q100": {
-        if (!this.ensureCash()) return;
-        const add = { Q10: 1000, Q20: 2000, Q50: 5000, Q100: 10000 }[id];
-        this.entry = String((Number(this.entry) || 0) + add);
-        this.setMessage(`Tendered ${formatRinggit(Number(this.entry))} — ENTER to confirm.`);
-        return;
-      }
-      default: {
-        // Digits build the tender in sen (2030 → RM20.30), like a real POS.
-        if (!this.ensureCash()) return;
-        if (this.entry.length >= 7) return;
-        this.entry = (this.entry + id).replace(/^0+(?=\d)/, "");
-        this.setMessage(`Tendered ${formatRinggit(Number(this.entry))} — ENTER to confirm.`);
-      }
+  private setScannerHeld(held: boolean): void {
+    if (held === this.scannerHeld) return;
+    this.scannerHeld = held;
+    this.gunTarget.copy(this.gun.position);
+  }
+
+  /** Put the held scanner under the cursor, on a plane just above the belt packs. */
+  private followCursor(raycaster: THREE.Raycaster): void {
+    const p = raycaster.ray.intersectPlane(this.holdPlane, this.scratch);
+    if (!p) return;
+    this.group.worldToLocal(p);
+    // Stay within arm's reach of the stand (the belt is to the west, −x).
+    this.gunTarget.set(THREE.MathUtils.clamp(p.x, -1.6, 0.35), p.y, THREE.MathUtils.clamp(p.z, -0.7, 0.45));
+  }
+
+  private updateScanner(dt: number): void {
+    if (this.scanS > 0) this.scanS -= dt;
+    const k = Math.min(1, dt * (this.scanS > 0 ? 28 : 16));
+    if (this.scannerHeld) {
+      this.gun.position.lerp(this.scanS > 0 ? this.scanAim : this.gunTarget, k);
+      this.gun.quaternion.slerp(this.gunHeldQuat, k);
+    } else {
+      this.gun.position.lerp(this.gunRestPos, k);
+      this.gun.quaternion.slerp(this.gunRestQuat, k);
     }
+  }
+
+  /** Dip the held scanner over `point` (world); `onHit` runs as the laser fires. */
+  private sweepScanner(point: THREE.Vector3, onHit: () => void): void {
+    this.scanS = SCAN_SWEEP_S;
+    this.scanAim.copy(point).add(SCAN_AIM_OFFSET);
+    this.group.worldToLocal(this.scanAim);
+    const target = point.clone();
+    const avatar = this.avatar;
+    this.after(SCAN_SWEEP_S / 2, () => {
+      if (this.avatar !== avatar) return;
+      this.flashLaser(target);
+      onHit();
+    });
+  }
+
+  private scanItem(mesh: THREE.Object3D, ready: boolean): void {
+    const s = this.session!;
+    if (s.phase !== "scanning") return;
+    if (!this.scannerHeld) {
+      this.setMessage("Pick up the scanner first — click it beside the belt.", true);
+      return;
+    }
+    if (!ready) {
+      this.setMessage("That item isn't at the scan line yet…", true);
+      return;
+    }
+    if (this.scanS > 0) return;
+    const box = new THREE.Box3().setFromObject(mesh);
+    const top = box.getCenter(new THREE.Vector3()).setY(box.max.y);
+    this.sweepScanner(top, () => this.scan());
   }
 
   private scan(): void {
     const s = this.session;
     if (!s || s.phase !== "scanning") return;
     const flow = this.opts.checkout;
-    const ready = flow && flow.isActive() ? flow.canScan() : true;
-    if (!ready) {
-      this.setMessage("Item not at the scanner yet…", true);
-      return;
-    }
+    if (flow && flow.isActive() && !flow.canScan()) return;
     const item = s.items[s.scanned];
     this.session = scanNext(s);
     flow?.onItemScanned();
     playBeep();
-    this.flashLaser();
     this.drawVfd(fitVfd(item.name), `RM${(item.priceSen / 100).toFixed(2).padStart(10)}`);
     if (this.session.phase === "payment") this.onAllScanned();
-    else this.setMessage(`${this.session.scanned}/${s.items.length} scanned — F for the next item.`);
+    else this.setMessage(`${this.session.scanned}/${s.items.length} scanned — click the next item at the scan line.`);
   }
 
   private onAllScanned(): void {
@@ -659,14 +711,29 @@ export class CashierMachine {
     const avatar = this.avatar!;
     const c = avatar.customer;
     this.drawVfd("JUMLAH / TOTAL", `RM${(s.subtotalSen / 100).toFixed(2).padStart(10)}`);
-    this.setMessage("All scanned. Bags right? Then take payment: CASH (C) / QR (Q) / CARD (K).");
+    this.setMessage("All scanned. Bags right? Then take the customer's payment.");
+    // A QR customer's phone is scanned with the same scanner — keep it in hand.
+    if (c.payment !== "qr") this.after(0.4, () => this.setScannerHeld(false));
     this.after(0.7, () => {
       if (this.avatar !== avatar || !this.session) return;
       if (c.payment === "qr") avatar.sayMoment("payQr");
       else if (c.payment === "card") avatar.sayMoment("payCard");
       else avatar.sayMoment("payCash", { amount: describeTender(c.tender) });
+      avatar.gesture("give", c.payment === "cash" ? "note" : c.payment === "card" ? "card" : "phone", 1.0, true);
+      this.paymentOffered = true;
+      this.setMessage(
+        c.payment === "cash"
+          ? "Click the cash in the customer's hand."
+          : c.payment === "card"
+            ? "Click the customer's card to charge it."
+            : "Scan the QR on the customer's phone with the scanner.",
+      );
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Bags
+  // -------------------------------------------------------------------------
 
   private changeBags(delta: 1 | -1): void {
     const s = this.session!;
@@ -677,8 +744,25 @@ export class CashierMachine {
       return;
     }
     this.session = next;
+    this.syncBags();
     if (delta > 0 && next.bags > this.avatar!.customer.bagsWanted) this.sayTooManyBags();
     this.setMessage(`Plastic bags: ${next.bags} × 20 sen.`);
+  }
+
+  /** Open bags on the customer side of the stand, one per bag on the bill. */
+  private syncBags(): void {
+    const want = this.session?.bags ?? 0;
+    while (this.placedBags.length < want) {
+      const i = this.placedBags.length;
+      const bag = new THREE.Group();
+      for (const g of this.placedBagGeo) bag.add(new THREE.Mesh(g, this.placedBagMat));
+      bag.position.set(-0.215 + (i % 3) * 0.06, TOP_Y, -0.2 + Math.floor(i / 3) * 0.075);
+      bag.rotation.y = 0.15 * ((i % 3) - 1);
+      bag.userData.pick = "bag" satisfies PickTag;
+      this.group.add(bag);
+      this.placedBags.push(bag);
+    }
+    while (this.placedBags.length > want) this.group.remove(this.placedBags.pop()!);
   }
 
   /** "No plastic" from someone with their own bag; "just N" from someone who asked for some. */
@@ -696,175 +780,138 @@ export class CashierMachine {
     playError();
     if (s.bags < want) {
       this.avatar!.sayMoment("bagForgotten", { bags: want });
-      this.setMessage(`Customer asked for ${want} plastic bag(s) — press BAG+ (B).`, true);
+      this.setMessage(`Customer asked for ${want} plastic bag(s) — click the bag stack.`, true);
     } else {
       this.sayTooManyBags();
-      this.setMessage("Too many bags charged — press BAG− (N).", true);
+      this.setMessage("Too many bags charged — click a bag to take it back.", true);
     }
     return false;
   }
 
-  /** Digits / quick tender auto-select cash when the customer pays cash. */
-  private ensureCash(): boolean {
+  // -------------------------------------------------------------------------
+  // Payment
+  // -------------------------------------------------------------------------
+
+  /** Click on what the customer holds out. The method is the customer's own. */
+  private takePayment(): void {
     const s = this.session!;
-    if (s.phase === "tender") return true;
-    if (s.phase === "payment" && this.avatar!.customer.payment === "cash") {
-      this.choosePayment("cash");
-      return this.session!.phase === "tender";
-    }
-    return false;
-  }
-
-  private choosePayment(method: PaymentMethod): void {
-    let s = this.session!;
-    const avatar = this.avatar!;
-    const c = avatar.customer;
-    if (s.phase === "scanning") {
-      this.setMessage("Finish scanning first.", true);
-      playError();
+    const c = this.avatar!.customer;
+    if (s.phase !== "payment" || !this.paymentOffered) return;
+    if (c.payment === "qr" && !this.scannerHeld) {
+      this.setMessage("Pick up the scanner to scan the customer's phone.", true);
       return;
     }
-    if (s.phase === "tender" || s.phase === "electronic") {
-      if (s.method === method || this.tenderHanded || this.waitingElectronic) return;
-      s = cancelPayment(s);
-    }
-    if (s.phase !== "payment") return;
     if (!this.bagsOk()) return;
-    if (method !== c.payment) {
-      playError();
-      avatar.sayMoment("wrongMethod", { method: methodLabel(c.payment) });
-      this.setMessage(`Customer wants to pay by ${methodLabel(c.payment)}.`, true);
-      return;
-    }
-    this.session = selectPayment(s, method);
-    this.entry = "";
-    if (method === "cash") this.startCash();
-    else this.startElectronic(method);
+    this.paymentOffered = false;
+    // Choosing the method locks the bags.
+    this.session = selectPayment(s, c.payment);
+    if (c.payment === "cash") this.takeCash();
+    else this.startElectronic(c.payment);
   }
 
-  private startCash(): void {
+  /** One click: the cash flies into the drawer, which springs open for the change. */
+  private takeCash(): void {
     const avatar = this.avatar!;
     const c = avatar.customer;
-    const s = this.session!;
-    this.drawVfd("JUMLAH / TOTAL", `RM${(s.totalDueSen / 100).toFixed(2).padStart(10)}`);
-    this.setMessage("Customer is handing you the cash…");
-    avatar.gesture("give", "note", 1.4);
-    // Pieces leave the hand mid-gesture and land on the tender mat.
-    this.after(0.55, () => {
-      if (this.avatar !== avatar) return;
-      const from = this.group.worldToLocal(this.handPosition());
-      c.tender.forEach((denom, i) => {
-        const piece = makePiece(denom);
-        this.group.add(piece);
-        const to = this.tenderAnchor.clone().add(new THREE.Vector3((i % 3) * 0.035, 0.0013 * i, (i % 2) * 0.02));
-        piece.position.copy(from);
-        piece.rotation.y = 0.25 * ((i % 3) - 1);
-        this.tenderPieces.push(piece);
-        this.fly(piece, from, to, 0.45, 0.12, i * 0.08, () => (denom >= 100 ? playNote() : playCoin()));
+    const next = receivePayment(this.session!, c.tenderSen);
+    if (next.phase === "tender") {
+      // Defensive: generated tenders always cover the rounded total.
+      console.error("[till] Customer tender below the total.", c.tenderSen, next.totalDueSen);
+      this.voidSale();
+      return;
+    }
+    this.session = next;
+    avatar.releaseGesture();
+    this.openDrawer();
+    const from = this.group.worldToLocal(this.handPosition());
+    const into = new THREE.Vector3(0, CABINET_H + 0.06, DRAWER_BASE_Z + DRAWER_OPEN_M - 0.08);
+    c.tender.forEach((denom, i) => {
+      const piece = makePiece(denom);
+      piece.position.copy(from);
+      this.group.add(piece);
+      this.fly(piece, from, into, 0.45, 0.1, i * 0.08, () => {
+        this.group.remove(piece);
+        if (denom >= 100) playNote();
+        else playCoin();
       });
-      this.tenderHanded = true;
-      this.setMessage(`Key in the cash received (${describeTender(c.tender)}) and press ENTER — or EXACT (X).`);
     });
+    this.drawer = deposit(this.drawer, c.tender);
+    this.refreshDrawerStacks();
+    if (next.phase === "done") {
+      this.setMessage("Exact money — no change needed.");
+      avatar.sayMoment("exact");
+      this.finishSale(true);
+      return;
+    }
+    this.drawVfd("BAKI / CHANGE", `RM${(next.changeDueSen / 100).toFixed(2).padStart(10)}`);
+    this.setMessage(
+      `Received ${describeTender(c.tender)}. Give ${formatRinggit(next.changeDueSen)} change: click notes/coins in the drawer, then click the tray.`,
+    );
   }
 
+  /** Card: charged on click. QR: the scanner dips over the customer's phone. */
   private startElectronic(method: "qr" | "card"): void {
     const avatar = this.avatar!;
     const s = this.session!;
-    this.waitingElectronic = true;
     const amount = `RM${(s.totalDueSen / 100).toFixed(2).padStart(10)}`;
     this.drawVfd(method === "qr" ? "IMBAS DUITNOW QR" : "TAP KAD / CARD", amount);
-    this.drawTerminal(method === "qr" ? "SCAN QR" : "TAP CARD", "#ffe082");
-    this.setMessage(method === "qr" ? "Waiting for the customer to scan the DuitNow QR…" : "Waiting for the customer to tap their card…");
-    avatar.gesture("tap", method === "qr" ? "phone" : "card", method === "qr" ? 2.3 : 1.7);
-    this.after(method === "qr" ? 2.4 : 1.8, () => {
+    this.drawTerminal(method === "qr" ? "SCANNING" : "TAP CARD", "#ffe082");
+    const approve = (): void => {
       if (this.avatar !== avatar || !this.session) return;
       this.session = confirmElectronic(this.session);
-      this.waitingElectronic = false;
       if (method === "qr") playQrSuccess();
       else playCardApproved();
       this.drawTerminal("APPROVED", "#9fd8a8");
       this.setMessage(method === "qr" ? "DuitNow payment received." : "Card approved.");
       avatar.sayMoment("thanks");
       this.finishSale(false);
+    };
+    if (method === "card") {
+      this.setMessage("Charging the card…");
+      this.after(1.2, () => {
+        avatar.releaseGesture();
+        approve();
+      });
+      return;
+    }
+    this.setMessage("Scanning the customer's QR…");
+    this.sweepScanner(this.handPosition(), () => {
+      playBeep();
+      avatar.releaseGesture();
+      this.after(0.5, approve);
     });
   }
 
-  private clear(): void {
-    const s = this.session!;
-    if (s.phase === "change" && this.tray.length > 0) {
-      const piece = this.tray.pop()!;
-      this.session = undoDispense(s);
-      this.drawer = deposit(this.drawer, [piece.denom]);
-      this.group.remove(piece.mesh);
-      this.refreshDrawerStacks();
-      this.setMessage(`Put back ${DENOM_LABELS[piece.denom]}. On tray ${formatRinggit(this.session.givenSen)}.`);
+  // -------------------------------------------------------------------------
+  // Change
+  // -------------------------------------------------------------------------
+
+  private handOverTray(): void {
+    if (this.session!.phase !== "change") return;
+    if (this.tray.length === 0) {
+      this.setMessage("Pick the change from the drawer first.", true);
+      playError();
       return;
     }
-    if (this.entry) {
-      this.entry = this.entry.slice(0, -1);
-      this.setMessage(this.entry ? `Tendered ${formatRinggit(Number(this.entry))}` : "Entry cleared.");
-    }
+    this.handOver();
   }
 
-  private enter(): void {
+  private returnTrayPiece(index: number): void {
     const s = this.session!;
-    if (s.phase === "tender") {
-      const c = this.avatar!.customer;
-      if (!this.tenderHanded) {
-        this.setMessage("Wait for the customer to hand over the cash.", true);
-        return;
-      }
-      if (!this.entry) {
-        this.setMessage("Key in the amount received first (digits, RM10/20/50/100 or EXACT).", true);
-        playError();
-        return;
-      }
-      const keyed = Number(this.entry);
-      if (keyed !== c.tenderSen) {
-        playError();
-        this.avatar!.sayMoment("wrongTender", { amount: describeTender(c.tender) });
-        this.setMessage(`Count again — the customer gave ${describeTender(c.tender)}.`, true);
-        this.entry = "";
-        return;
-      }
-      this.session = receivePayment(s, keyed);
-      this.entry = "";
-      // The tender goes into the drawer; the drawer springs open.
-      this.drawer = deposit(this.drawer, c.tender);
-      for (const piece of this.tenderPieces) this.group.remove(piece);
-      this.tenderPieces = [];
-      this.refreshDrawerStacks();
-      this.openDrawer();
-      if (this.session.phase === "done") {
-        this.setMessage("Exact money — no change needed.");
-        this.avatar!.sayMoment("exact");
-        this.finishSale(true);
-      } else {
-        this.drawVfd("BAKI / CHANGE", `RM${(this.session.changeDueSen / 100).toFixed(2).padStart(10)}`);
-        this.setMessage(`Give ${formatRinggit(this.session.changeDueSen)} change: click notes/coins in the drawer, then ENTER.`);
-      }
-      return;
-    }
-    if (s.phase === "change") {
-      if (this.tray.length === 0) {
-        this.setMessage("Pick the change from the drawer first.", true);
-        playError();
-        return;
-      }
-      this.handOver();
-      return;
-    }
-    if (s.phase === "payment") {
-      const pay = this.avatar!.customer.payment;
-      if (pay === "cash") this.choosePayment("cash");
-      else this.setMessage(`Press ${pay === "qr" ? "QR (Q)" : "CARD (K)"} for this customer.`, true);
-    }
+    const piece = this.tray[index];
+    if (s.phase !== "change" || !piece) return;
+    this.session = undoDispense(s, piece.denom);
+    this.tray.splice(index, 1);
+    this.drawer = deposit(this.drawer, [piece.denom]);
+    this.group.remove(piece.mesh);
+    this.refreshDrawerStacks();
+    this.setMessage(`Put back ${DENOM_LABELS[piece.denom]}. On tray ${formatRinggit(this.session.givenSen)}.`);
   }
 
   private pickFromDrawer(denom: number): void {
     const s = this.session!;
     if (s.phase !== "change") {
-      this.setMessage(s.phase === "tender" ? "Key in the cash received first." : "No change needed right now.", true);
+      this.setMessage("No change needed right now.", true);
       return;
     }
     const next = withdraw(this.drawer, denom);
@@ -893,8 +940,8 @@ export class CashierMachine {
       remaining > 0
         ? `On tray ${formatRinggit(this.session.givenSen)} of ${formatRinggit(this.session.changeDueSen)}.`
         : remaining === 0
-          ? "That's the change — ENTER (or click the tray) to hand it over."
-          : `Tray is ${formatRinggit(-remaining)} over — CLR takes the last piece back.`,
+          ? "That's the change — click the tray to hand it over."
+          : `Tray is ${formatRinggit(-remaining)} over — click a piece on the tray to put it back.`,
     );
   }
 
@@ -906,7 +953,7 @@ export class CashierMachine {
     if (result.kind === "short") {
       playError();
       avatar.sayMoment("short", { amount: formatRinggit(result.diffSen) });
-      this.setMessage(`Short by ${formatRinggit(result.diffSen)} — add more, then ENTER again.`, true);
+      this.setMessage(`Short by ${formatRinggit(result.diffSen)} — add more, then click the tray again.`, true);
       return;
     }
     // The tray goes to the customer's hand.
@@ -953,8 +1000,7 @@ export class CashierMachine {
     const avatar = this.avatar;
     const s = this.session;
     if (!avatar || !s) return;
-    for (const piece of this.tenderPieces) this.group.remove(piece);
-    this.tenderPieces = [];
+    avatar.releaseGesture();
     if (s.tenderedSen !== null) {
       // The tender already went into the drawer — hand it back.
       for (const d of avatar.customer.tender) this.drawer = withdraw(this.drawer, d) ?? this.drawer;
@@ -978,8 +1024,10 @@ export class CashierMachine {
     this.session = null;
     this.avatar = null;
     this.finishing = false;
-    this.waitingElectronic = false;
-    this.entry = "";
+    this.paymentOffered = false;
+    this.scanS = 0;
+    this.setScannerHeld(false);
+    this.syncBags();
     this.setMessage(paid ? "Next customer, please." : "Transaction voided.");
     this.after(2.5, () => {
       if (!this.session) this.drawVfd("SELAMAT DATANG", STORE_NAME);
@@ -990,11 +1038,6 @@ export class CashierMachine {
   // -------------------------------------------------------------------------
   // Drawer
   // -------------------------------------------------------------------------
-
-  private toggleDrawer(): void {
-    if (this.drawerOpen) this.closeDrawer();
-    else this.openDrawer();
-  }
 
   private openDrawer(): void {
     if (this.drawerOpen) return;
@@ -1032,18 +1075,42 @@ export class CashierMachine {
   // Picking
   // -------------------------------------------------------------------------
 
+  /** Nearest clickable thing under the cursor ray: stand parts, the belt pack, or the customer's hand. */
   private pick(raycaster: THREE.Raycaster): PickHit | null {
-    const targets: THREE.Object3D[] = [...this.keyMeshes.values(), this.trayHit];
-    if (this.drawerFront) targets.push(this.drawerFront);
+    const targets: THREE.Object3D[] = [this.trayHit, this.holster, this.bagStack, ...this.placedBags];
+    // A piece still flying out of its slot would swallow a quick second click on that slot.
+    for (const p of this.tray) if (!this.flights.some((f) => f.obj === p.mesh)) targets.push(p.mesh);
+    // The held scanner sits under the cursor — never let it block its own aim.
+    if (!this.scannerHeld) targets.push(this.gun);
     if (this.drawerZ > DRAWER_OPEN_M * 0.6) targets.push(...this.slotHits.values());
-    const hits = raycaster.intersectObjects(targets, false);
-    const obj = hits[0]?.object;
-    if (!obj) return null;
-    const data = obj.userData as { keyId?: KeyId; slotDenom?: number; tray?: boolean; drawerFront?: boolean };
-    if (data.keyId) return { kind: "key", id: data.keyId };
-    if (data.slotDenom) return { kind: "slot", denom: data.slotDenom };
-    if (data.tray) return { kind: "tray" };
-    if (data.drawerFront) return { kind: "drawer" };
+    let best: PickHit | null = null;
+    let bestD = Infinity;
+    const hit = raycaster.intersectObjects(targets, true)[0];
+    if (hit) {
+      best = this.classify(hit.object);
+      bestD = hit.distance;
+    }
+    const belt = this.opts.checkout?.pickBelt(raycaster);
+    if (belt && belt.distance < bestD) {
+      best = { kind: "item", mesh: belt.mesh, ready: belt.ready };
+      bestD = belt.distance;
+    }
+    if (this.paymentOffered) {
+      const hand = this.handPosition();
+      const d = raycaster.ray.origin.distanceTo(hand);
+      if (raycaster.ray.distanceToPoint(hand) < HAND_PICK_RADIUS_M && d < bestD) best = { kind: "payment" };
+    }
+    return best;
+  }
+
+  private classify(obj: THREE.Object3D): PickHit | null {
+    const trayIndex = this.tray.findIndex((p) => p.mesh === obj);
+    if (trayIndex >= 0) return { kind: "trayPiece", index: trayIndex };
+    for (let cur: THREE.Object3D | null = obj; cur && cur !== this.group; cur = cur.parent) {
+      const data = cur.userData as { slotDenom?: number; pick?: PickTag };
+      if (data.slotDenom) return { kind: "slot", denom: data.slotDenom };
+      if (data.pick) return { kind: data.pick };
+    }
     return null;
   }
 
@@ -1090,30 +1157,18 @@ export class CashierMachine {
     this.screenDirty = true;
   }
 
-  private flashLaser(): void {
+  private flashLaser(end: THREE.Vector3): void {
     this.group.updateMatrixWorld(true);
     const tip = this.scannerTip.getWorldPosition(this.scratch);
-    const end = this.opts.checkout ? this.opts.checkout.scanPoint(this.scratch2) : tip.clone().add(new THREE.Vector3(-0.4, -0.2, 0));
     this.laserPositions.set([tip.x, tip.y, tip.z, end.x, end.y, end.z]);
     (this.laser.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     this.laser.visible = true;
     this.laserS = 0.15;
   }
 
-  private animateKey(id: KeyId): void {
-    const mesh = this.keyMeshes.get(id);
-    if (!mesh) return;
-    mesh.position.y = KEY_REST_Y - 0.005;
-    this.after(0.09, () => {
-      mesh.position.y = KEY_REST_Y;
-    });
-  }
-
   private clearSaleVisuals(): void {
     for (const p of this.tray) this.group.remove(p.mesh);
     this.tray = [];
-    for (const p of this.tenderPieces) this.group.remove(p);
-    this.tenderPieces = [];
     this.flights = [];
     this.receiptPaper.visible = false;
   }
@@ -1202,8 +1257,7 @@ export class CashierMachine {
 
     if (s.method) row("Payment", methodLabel(s.method), 330, "#9fd8a8");
     if (s.method === "cash") {
-      const tendered = s.tenderedSen ?? (this.entry ? Number(this.entry) : null);
-      row("Tendered", tendered === null ? "—" : (tendered / 100).toFixed(2), 372, s.tenderedSen === null ? "#ffe082" : "#c9bea6");
+      row("Tendered", s.tenderedSen === null ? "—" : (s.tenderedSen / 100).toFixed(2), 372);
       if (s.phase === "change" || (s.phase === "done" && s.changeDueSen > 0)) {
         row("CHANGE", (s.changeDueSen / 100).toFixed(2), 430, "#7fe0a0", 40);
         row("On tray", (s.givenSen / 100).toFixed(2), 478, s.givenSen === s.changeDueSen ? "#7fe0a0" : "#ffb38a");
@@ -1339,9 +1393,7 @@ export class CashierMachine {
     }
     const front = new THREE.Mesh(new THREE.BoxGeometry(DRAWER_W + 0.04, DRAWER_H + 0.03, 0.02), lambert("#2d2418"));
     front.position.set(0, DRAWER_H / 2, DRAWER_D / 2 + 0.01);
-    front.userData.drawerFront = true;
     g.add(front);
-    this.drawerFront = front;
     const handle = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.014, 0.02), lambert("#b89a72"));
     handle.position.set(0, DRAWER_H / 2, DRAWER_D / 2 + 0.03);
     g.add(handle);
@@ -1431,6 +1483,7 @@ export class CashierMachine {
     this.group.add(monitor);
   }
 
+  /** Decorative keypad — the till is worked with the mouse, not the keys. */
   private buildKeys(): void {
     const originX = -0.1;
     const originZ = 0.04;
@@ -1446,25 +1499,26 @@ export class CashierMachine {
       });
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.016, KEY_SIZE), [sideMat, sideMat, topMat, sideMat, sideMat, sideMat]);
       mesh.position.set(originX + (k.col + (span - 1) / 2) * KEY_PITCH, KEY_REST_Y, originZ + k.row * KEY_PITCH);
-      mesh.userData.keyId = k.id;
       this.group.add(mesh);
-      this.keyMeshes.set(k.id, mesh);
-      this.keyMats.set(k.id, topMat);
     }
   }
 
   private buildTray(): THREE.Mesh {
     const tray = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.012, 0.13), lambert("#4a3b28"));
     tray.position.set(this.trayAnchor.x, TOP_Y + 0.006, this.trayAnchor.z);
-    tray.userData.tray = true;
+    tray.userData.pick = "tray" satisfies PickTag;
     this.group.add(tray);
+    // Invisible margin round the tray: a note covers most of it, and a click
+    // on a piece puts that piece back, so the edges must still hand over.
+    const margin = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18, 0.01, 0.15),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+    );
+    margin.position.y = -0.001;
+    tray.add(margin);
     const lip = new THREE.Mesh(new THREE.BoxGeometry(0.105, 0.02, 0.006), lambert("#5a4832"));
     lip.position.set(this.trayAnchor.x, TOP_Y + 0.012, this.trayAnchor.z + 0.066);
     this.group.add(lip);
-    // Tender mat on the customer side.
-    const mat = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.004, 0.1), lambert("#3d5a40"));
-    mat.position.set(this.tenderAnchor.x + 0.035, TOP_Y + 0.002, this.tenderAnchor.z);
-    this.group.add(mat);
     return tray;
   }
 
@@ -1556,12 +1610,15 @@ export class CashierMachine {
     return paper;
   }
 
-  private buildScanner(): void {
+  /** Handheld scanner in its cradle (returned). Gun and cradle both pick as "scanner". */
+  private buildScanner(): THREE.Mesh {
     const dark = lambert("#1a1a1a");
     const holster = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.08), dark);
     holster.position.set(-STAND_W / 2 + 0.03, TOP_Y + 0.025, -0.06);
+    holster.userData.pick = "scanner" satisfies PickTag;
     this.group.add(holster);
-    const gun = new THREE.Group();
+    const gun = this.gun;
+    gun.userData.pick = "scanner" satisfies PickTag;
     const handle = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.1, 0.035), dark);
     handle.position.y = 0.05;
     gun.add(handle);
@@ -1576,7 +1633,32 @@ export class CashierMachine {
     gun.add(this.scannerTip);
     gun.position.set(-STAND_W / 2 + 0.03, TOP_Y + 0.03, -0.06);
     gun.rotation.set(-0.35, Math.PI / 2 - 0.3, 0);
+    this.gunRestPos.copy(gun.position);
+    this.gunRestQuat.copy(gun.quaternion);
     this.group.add(gun);
+    return holster;
+  }
+
+  /** Folded plastic bags between the cradle and the change tray: click to add one. */
+  private buildBagStack(): THREE.Group {
+    const g = new THREE.Group();
+    const white = lambert("#f4f4f2");
+    for (let k = 0; k < 5; k += 1) {
+      const sheet = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.005, 0.065), white);
+      sheet.position.set(((k % 2) - 0.5) * 0.003, 0.0025 + k * 0.005, 0);
+      g.add(sheet);
+    }
+    const tag = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.08, 0.028),
+      new THREE.MeshBasicMaterial({ map: labelTexture("BAG 20sen", "#f4f4f2", "#b45309", 256, 90, 44), toneMapped: false }),
+    );
+    tag.rotation.x = -Math.PI / 2;
+    tag.position.y = 0.0255;
+    g.add(tag);
+    g.position.set(-0.24, TOP_Y, 0.04);
+    g.userData.pick = "bagStack" satisfies PickTag;
+    this.group.add(g);
+    return g;
   }
 }
 
@@ -1683,7 +1765,7 @@ function lambert(color: string): THREE.MeshLambertMaterial {
   return new THREE.MeshLambertMaterial({ color, flatShading: true });
 }
 
-function buildVoidPrompt(): HTMLDivElement {
+function buildVoidPrompt(onAnswer: (yes: boolean) => void): HTMLDivElement {
   const el = document.createElement("div");
   el.id = "void-prompt";
   el.hidden = true;
@@ -1691,8 +1773,13 @@ function buildVoidPrompt(): HTMLDivElement {
     <div class="void-card">
       <div class="void-title">Void this transaction?</div>
       <div class="void-body">The customer leaves without paying.</div>
-      <div class="void-actions"><span><b>Y</b> Void</span><span><b>N</b> Keep serving</span></div>
+      <div class="void-actions">
+        <button type="button" class="void-yes">Void</button>
+        <button type="button" class="void-no">Keep serving <kbd>Esc</kbd></button>
+      </div>
     </div>`;
+  el.querySelector(".void-yes")!.addEventListener("click", () => onAnswer(true));
+  el.querySelector(".void-no")!.addEventListener("click", () => onAnswer(false));
   document.body.appendChild(el);
   return el;
 }

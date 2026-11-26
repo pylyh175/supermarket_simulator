@@ -12,8 +12,6 @@ export type Moment =
   | "payCash"
   | "payQr"
   | "payCard"
-  | "wrongMethod"
-  | "wrongTender"
   | "short"
   | "over"
   | "exact"
@@ -32,10 +30,8 @@ const LINES: Record<Moment, readonly string[]> = {
   bringsBag: ["Tak payah plastik, I bawa beg sendiri.", "No plastic ya, got my own bag.", "Saya ada beg, tak apa."],
   wantsBag: ["Plastik {bags} ya.", "Boleh bagi plastik {bags}?", "Need {bags} plastic bag ah."],
   payCash: ["Nah, {amount}.", "Here, {amount}.", "{amount} ya.", "Ambil ni, {amount}."],
-  payQr: ["Saya bayar QR ya.", "Can DuitNow QR ah?", "Scan QR boleh?", "E-wallet okay?"],
+  payQr: ["Saya bayar QR ya.", "Scan my phone, can?", "Boleh scan QR saya?", "E-wallet okay?"],
   payCard: ["Card boleh?", "I pay by card ya.", "Tap kad, boleh?"],
-  wrongMethod: ["Eh, bukan, saya nak bayar {method}.", "No lah, {method} ya.", "Aiyo, I said {method}."],
-  wrongTender: ["Eh, saya bagi {amount} je.", "I gave you {amount} only lah.", "Bukan, {amount} tadi."],
   short: ["Eh, kurang {amount} lah.", "Boss, short {amount} ah.", "Change tak cukup — kurang {amount}."],
   over: ["Boss, lebih ni — {amount} pulang balik.", "Eh, extra {amount}, ambil balik.", "Too much lah, {amount} here."],
   exact: ["Ngam ngam, terima kasih!", "Cun, thanks boss!", "Okay, ngam!", "Terima kasih banyak!"],
@@ -63,7 +59,6 @@ export interface LineContext {
   greeting?: string;
   amount?: string;
   bags?: number;
-  method?: string;
 }
 
 export function line(moment: Moment, ctx: LineContext): string {
@@ -72,8 +67,7 @@ export function line(moment: Moment, ctx: LineContext): string {
   return template
     .replace("{greeting}", ctx.greeting ?? "Hai")
     .replace("{amount}", ctx.amount ?? "")
-    .replace("{bags}", String(ctx.bags ?? 1))
-    .replace("{method}", ctx.method ?? "cash");
+    .replace("{bags}", String(ctx.bags ?? 1));
 }
 
 /** How a customer says the cash they hand over: "RM20 + 30 sen". */

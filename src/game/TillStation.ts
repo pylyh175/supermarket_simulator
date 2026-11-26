@@ -1,7 +1,7 @@
 // Till station — an invisible zone volume on the cashier (+Z) side of the
 // checkout counter. The main loop polls isPlayerInside() every frame and
-// decides what E/Space does there (open the till while a customer is
-// waiting at it).
+// decides what E does there (open the till while a customer is waiting at
+// it, or close up once the day is over and the store is empty).
 import type * as THREE from "three";
 import { TILL_X, TILL_Z } from "../three/storeLayout";
 

@@ -135,7 +135,7 @@ function boot(): void {
 
   const tillStation = new TillStation();
   // While the till is open the player is frozen and the mouse is free for
-  // the POS keys and the drawer.
+  // the scanner, bags, the customer's payment and the drawer.
   let playerFrozen = false;
   let paused = true; // start screen
   let awaitingResume = false;
@@ -472,15 +472,10 @@ function boot(): void {
       return;
     }
     if (paused) return;
-    if (event.code === "KeyE" || event.code === "Space") {
-      if (tillStation.isPlayerInside(player.position())) {
-        openTill();
-        event.preventDefault();
-      }
-      return;
-    }
-    if (event.code === "KeyC" && dayOver && customers?.storeEmpty()) {
-      openSummary();
+    // E is the only key outside the till: serve, or close up once everyone's gone.
+    if (event.code === "KeyE" && tillStation.isPlayerInside(player.position())) {
+      if (customers?.getTillCustomer()) openTill();
+      else if (dayOver && customers?.storeEmpty()) openSummary();
       event.preventDefault();
     }
   });
@@ -493,7 +488,7 @@ function boot(): void {
     clickRaycaster.setFromCamera(pointer, camera);
   };
   // Capture phase on the canvas: while the till is open this listener takes
-  // the click (POS keys, drawer slots, tray) and stops it reaching the
+  // the click (scanner, belt, bags, payment, drawer, tray) and stops it reaching the
   // FpsController, whose click handler would re-lock the pointer. Stopping
   // propagation here used to swallow the till's own handler too.
   renderer.domElement.addEventListener(
@@ -510,7 +505,7 @@ function boot(): void {
   renderer.domElement.addEventListener("mousemove", (event) => {
     if (!playerFrozen || !machine || cameraMode !== "till") return;
     toPointer(event);
-    renderer.domElement.style.cursor = machine.hover(clickRaycaster) ? "pointer" : "";
+    renderer.domElement.style.cursor = machine.hover(clickRaycaster);
   });
 
   // -------------------------------------------------------------------------
@@ -687,7 +682,11 @@ function boot(): void {
     if (!playerFrozen && !paused && tillStation.isPlayerInside(player.position())) {
       const ready = customers?.getTillCustomer();
       hud.prompt.hidden = false;
-      hud.prompt.textContent = ready ? `E — Serve ${ready.customer.name}` : "Waiting for the next customer…";
+      hud.prompt.textContent = ready
+        ? `E — Serve ${ready.customer.name}`
+        : dayOver && customers?.storeEmpty()
+          ? "E — Close up and count the drawer"
+          : "Waiting for the next customer…";
     } else {
       hud.prompt.hidden = true;
     }
@@ -744,20 +743,17 @@ function buildHud(): Hud {
   legend.hidden = true;
   legend.innerHTML = `
     <div class="legend-title">At the till</div>
-    <div><kbd>F</kbd> scan the item at the scanner</div>
-    <div><kbd>B</kbd> / <kbd>N</kbd> plastic bag + / −</div>
-    <div><kbd>C</kbd> cash · <kbd>Q</kbd> DuitNow QR · <kbd>K</kbd> card</div>
-    <div><kbd>0-9</kbd> cash received in sen · <kbd>X</kbd> exact</div>
-    <div>Click notes / coins in the drawer for change</div>
-    <div><kbd>Enter</kbd> confirm / hand over · <kbd>⌫</kbd> undo</div>
-    <div><kbd>D</kbd> drawer · <kbd>Esc</kbd> void the sale</div>
-    <div class="legend-foot">You can also click the POS keys.</div>`;
+    <div>Pick up the scanner, click the item at the scan line</div>
+    <div>Click the bag stack to add a bag, a bag to take it back</div>
+    <div>Click what the customer holds out to take payment</div>
+    <div>Change: click the drawer, then the tray</div>
+    <div class="legend-foot"><kbd>Esc</kbd> void the sale</div>`;
   document.body.appendChild(legend);
 
   const banner = document.createElement("div");
   banner.id = "close-banner";
   banner.hidden = true;
-  banner.innerHTML = `<b>Kedai tutup!</b> Everyone's served — press <kbd>C</kbd> to close up and count the drawer.`;
+  banner.innerHTML = `<b>Kedai tutup!</b> Everyone's served — press <kbd>E</kbd> at the till to close up and count the drawer.`;
   document.body.appendChild(banner);
 
   const toastRoot = document.createElement("div");

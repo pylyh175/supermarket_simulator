@@ -292,7 +292,7 @@ export class CheckoutFlow {
 
     // Warm scanner line across the belt at the waiting position. It sits on
     // the slab top (below the items resting on the rollers) and marks where a
-    // front pack stops for E.
+    // front pack stops to be scanned.
     this.scanLine = new THREE.Mesh(
       new THREE.BoxGeometry(0.012, 0.004, beltDepthM * 0.86),
       new THREE.MeshBasicMaterial({ color: SCAN_LINE_COLOR }),
@@ -385,9 +385,17 @@ export class CheckoutFlow {
     this.toteGroup.visible = false;
   }
 
-  /** World point on the belt's scan line (scanner laser target). */
-  scanPoint(target: THREE.Vector3): THREE.Vector3 {
-    return target.copy(this.scanLine.position).setY(this.scanLine.position.y + 0.05);
+  /**
+   * Belt pack under the ray, if any. `ready` = it is the pack waiting at the
+   * scan line (the only one the handheld scanner may scan).
+   */
+  pickBelt(raycaster: THREE.Raycaster): { mesh: THREE.Object3D; ready: boolean; distance: number } | null {
+    if (!this.active) return null;
+    const hit = raycaster.intersectObjects(this.beltMeshes, true)[0];
+    if (!hit) return null;
+    const index = this.beltMeshes.findIndex((m) => m === hit.object || m.getObjectById(hit.object.id));
+    if (index < 0) return null;
+    return { mesh: this.beltMeshes[index], ready: this.belt.items[index]?.state === "waiting", distance: hit.distance };
   }
 
   /** The customer took the bag: empty it for the next sale. */

@@ -67,6 +67,8 @@ interface Gesture {
   t: number;
   duration: number;
   prop: HandProp;
+  /** Held: stays at full pose after ramping in until released. */
+  hold?: boolean;
 }
 
 interface Agent {
@@ -106,8 +108,11 @@ export interface CustomerAvatar {
   readonly customer: Customer;
   readonly group: THREE.Group;
   say(text: string, seconds?: number): void;
-  sayMoment(moment: Moment, extra?: { amount?: string; bags?: number; method?: string }): void;
-  gesture(kind: GestureKind, prop?: HandProp, durationS?: number): void;
+  sayMoment(moment: Moment, extra?: { amount?: string; bags?: number }): void;
+  /** `hold` keeps the arm out (e.g. offering cash) until `releaseGesture()`. */
+  gesture(kind: GestureKind, prop?: HandProp, durationS?: number, hold?: boolean): void;
+  /** Lower a held gesture's arm (ramps out). */
+  releaseGesture(): void;
   setHandProp(prop: HandProp): void;
   setCarry(carry: Carry): void;
   /** World position of the right hand (where cash / cards change hands). */
@@ -485,6 +490,7 @@ export class Customers3D {
     const g = agent.gesture;
     if (g) {
       g.t += dt;
+      if (g.hold) g.t = Math.min(g.t, g.duration / 2);
       const u = Math.min(1, g.t / g.duration);
       // Ramp in (0–25 %), hold, ramp out (75–100 %).
       const w = u < 0.25 ? smooth(u / 0.25) : u > 0.75 ? smooth((1 - u) / 0.25) : 1;
@@ -524,8 +530,14 @@ export class Customers3D {
       say: (text, seconds) => this.say(agent, text, seconds),
       sayMoment: (moment, extra) =>
         this.say(agent, line(moment, { rng: Math.random, greeting: greetingFor(this.clockMinutes), ...extra })),
-      gesture: (kind, prop = null, durationS) => {
-        agent.gesture = { kind, t: 0, duration: durationS ?? GESTURE_POSES[kind].duration, prop };
+      gesture: (kind, prop = null, durationS, hold = false) => {
+        agent.gesture = { kind, t: 0, duration: durationS ?? GESTURE_POSES[kind].duration, prop, hold };
+      },
+      releaseGesture: () => {
+        const g = agent.gesture;
+        if (!g?.hold) return;
+        g.hold = false;
+        g.t = Math.max(g.t, g.duration * 0.75);
       },
       setHandProp: (prop) => setHandProp(agent.rig, prop),
       setCarry: (carry) => {

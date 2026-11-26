@@ -121,12 +121,6 @@ export function selectPayment(s: Session, method: PaymentMethod): Session {
   };
 }
 
-/** Back out of a chosen method (before any cash changed hands). */
-export function cancelPayment(s: Session): Session {
-  if (s.phase !== "tender" && s.phase !== "electronic") return s;
-  return { ...s, method: null, roundingSen: 0, totalDueSen: s.subtotalSen, phase: "payment" };
-}
-
 /** QR / card terminal approved the payment. */
 export function confirmElectronic(s: Session): Session {
   if (s.phase !== "electronic") return s;
@@ -151,11 +145,11 @@ export function dispense(s: Session, denomSen: number): Session {
   return { ...s, given: [...s.given, denomSen], givenSen: s.givenSen + denomSen };
 }
 
-/** Take the last piece back off the change tray. */
-export function undoDispense(s: Session): Session {
-  if (s.phase !== "change" || s.given.length === 0) return s;
-  const last = s.given[s.given.length - 1];
-  return { ...s, given: s.given.slice(0, -1), givenSen: s.givenSen - last };
+/** Take one piece of `denomSen` back off the change tray (the latest one picked). */
+export function undoDispense(s: Session, denomSen: number): Session {
+  const i = s.given.lastIndexOf(denomSen);
+  if (s.phase !== "change" || i < 0) return s;
+  return { ...s, given: [...s.given.slice(0, i), ...s.given.slice(i + 1)], givenSen: s.givenSen - denomSen };
 }
 
 /**
