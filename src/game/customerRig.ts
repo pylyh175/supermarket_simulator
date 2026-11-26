@@ -235,12 +235,51 @@ function buildBag(color: string, plastic: boolean): THREE.Group {
   return g;
 }
 
+/**
+ * Deterministic faux QR modules (decorative — encodes nothing): a 21×21 grid
+ * with three finder squares, drawn at (x, y) with `cell`-pixel modules.
+ */
+export function drawFauxQr(ctx: CanvasRenderingContext2D, x: number, y: number, cell: number, seed = 1234567): void {
+  ctx.fillStyle = "#111111";
+  for (let row = 0; row < 21; row += 1) {
+    for (let col = 0; col < 21; col += 1) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      const fx = col < 7 ? col : col > 13 ? col - 14 : -1;
+      const fy = row < 7 ? row : row > 13 ? row - 14 : -1;
+      const finder = fx >= 0 && fy >= 0 && !(col > 13 && row > 13);
+      const on = finder
+        ? fx === 0 || fx === 6 || fy === 0 || fy === 6 || (fx >= 2 && fx <= 4 && fy >= 2 && fy <= 4)
+        : seed % 3 === 0;
+      if (on) ctx.fillRect(x + col * cell, y + row * cell, cell, cell);
+    }
+  }
+}
+
+let phoneScreen: THREE.Material | null = null;
+/** Phone screen showing an e-wallet pay code — the cashier scans it for QR payments. */
+function phoneScreenMat(): THREE.Material {
+  if (phoneScreen) return phoneScreen;
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 256;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return (phoneScreen = mat("#7fd3ff"));
+  ctx.fillStyle = "#1f6fd1";
+  ctx.fillRect(0, 0, 128, 256);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(10, 70, 108, 108);
+  drawFauxQr(ctx, 11.5, 73, 5, 7654321);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return (phoneScreen = new THREE.MeshBasicMaterial({ map: texture }));
+}
+
 function buildHandProps(): Record<Exclude<HandProp, null>, THREE.Object3D> {
   const note = mesh(geo("prop-note", () => new THREE.BoxGeometry(0.14, 0.004, 0.07)), "#6fae7c");
   note.position.set(0, -0.02, 0.04);
   const phone = mesh(geo("prop-phone", () => new THREE.BoxGeometry(0.075, 0.15, 0.01)), "#1b1b1f");
   phone.position.set(0, -0.05, 0.03);
-  const screen = mesh(geo("prop-phone-screen", () => new THREE.PlaneGeometry(0.064, 0.13)), "#7fd3ff");
+  const screen = new THREE.Mesh(geo("prop-phone-screen", () => new THREE.PlaneGeometry(0.064, 0.13)), phoneScreenMat());
   screen.position.set(0, 0, 0.0055);
   phone.add(screen);
   const card = mesh(geo("prop-card", () => new THREE.BoxGeometry(0.086, 0.054, 0.004)), "#1d4f91");
