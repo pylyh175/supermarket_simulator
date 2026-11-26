@@ -1,17 +1,9 @@
 // Till station — an invisible zone volume on the cashier (+Z) side of the
 // checkout counter. The main loop polls isPlayerInside() every frame and
 // decides what E/Space does there (open the till while a customer is
-// waiting). This class owns the zone bounds and the ServingState machine;
-// the transition into "serving" itself happens in customers3d.ts.
+// waiting at it).
 import type * as THREE from "three";
 import { TILL_X, TILL_Z } from "../three/storeLayout";
-
-/**
- * Where a customer is in the serve flow. Task 7 drives the close of the
- * till overlay, which flips "serving" → "walking-out" (via
- * Customers3D.completeService()).
- */
-export type ServingState = "walking-in" | "waiting" | "walking-out" | "serving";
 
 // The counter spans roughly z ∈ [TILL_Z - 0.45, TILL_Z + 0.45]; the cashier
 // side starts just past that. The zone is generous on purpose — walking up
