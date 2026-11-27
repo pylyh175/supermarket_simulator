@@ -33,6 +33,12 @@ import { FLOAT_SEN } from "../register/drawer";
 const MAX_FRAME_DELTA_S = 0.05;
 /** Seconds the camera takes to glide to / from the cashier's view. */
 const CAMERA_GLIDE_S = 0.55;
+const BASE_FOV = 70;
+/** Field of view while holding right-click at the till. */
+const ZOOM_FOV = 45;
+const DEG = Math.PI / 180;
+/** Mouse-look range at the till; yaw is measured from facing the counter. */
+const TILL_LOOK = { yawHalfRange: 100 * DEG, pitchMin: -75 * DEG, pitchMax: 35 * DEG };
 
 // Hover tint written into the hovered instance's instanceColor slot and the
 // write-back value used on unhover. Shared, never mutated.
@@ -144,6 +150,8 @@ function boot(): void {
   let checkoutFlow: CheckoutFlow | null = null;
   let machine: CashierMachine | null = null;
   let tillAvatar: CustomerAvatar | null = null;
+  let zoomed = false;
+  const clickRaycaster = new THREE.Raycaster();
 
   // -------------------------------------------------------------------------
   // Hover tooltip + crosshair. A center-screen raycast shows a name + price
@@ -163,6 +171,10 @@ function boot(): void {
 
   const setCrosshairHidden = (hidden: boolean): void => {
     if (crosshairEl) crosshairEl.hidden = hidden;
+  };
+  /** Ring the crosshair when a click would act on what it points at. */
+  const setCrosshairActive = (active: boolean): void => {
+    crosshairEl?.classList.toggle("active", active);
   };
   const updateCrosshairVisibility = (): void => {
     setCrosshairHidden(document.pointerLockElement == null);
@@ -311,6 +323,13 @@ function boot(): void {
   const updateHover = (): void => {
     if (playerFrozen || paused) {
       hideHover();
+      // At the till, aim the scanner and highlight from the crosshair every frame.
+      if (playerFrozen && !paused && machine && cameraMode === "till" && document.pointerLockElement === renderer.domElement) {
+        clickRaycaster.setFromCamera(raycastCenter, camera);
+        setCrosshairActive(machine.hover(clickRaycaster) === "pointer");
+      } else {
+        setCrosshairActive(false);
+      }
       return;
     }
     hoverRaycaster.setFromCamera(raycastCenter, camera);
@@ -321,8 +340,10 @@ function boot(): void {
     if (hit && mesh?.isMesh && productId) {
       showTooltip(productId);
       liftHovered(mesh, hit.instanceId);
+      setCrosshairActive(true);
     } else {
       hideHover();
+      setCrosshairActive(false);
     }
   };
 
@@ -346,11 +367,13 @@ function boot(): void {
   const tillEuler = new THREE.Euler(0, 0, 0, "YXZ");
 
   const updateCamera = (dt: number): void => {
-    const fovTarget = 70;
+    const fovTarget = zoomed && cameraMode === "till" ? ZOOM_FOV : BASE_FOV;
     if (Math.abs(camera.fov - fovTarget) > 0.01) {
       camera.fov += (fovTarget - camera.fov) * Math.min(1, dt * 6);
       camera.updateProjectionMatrix();
     }
+    // Slower look while zoomed, so aiming stays steady.
+    player.setSensitivity(settings.sensitivity * (camera.fov / BASE_FOV));
     if (cameraMode === "player") {
       camera.position.set(player.position().x, eyeHeightM(), player.position().z);
       camera.rotation.set(player.pitch(), player.yaw(), 0);
@@ -371,6 +394,7 @@ function boot(): void {
         // Sync FpsController orientation to the till pose so mouse look starts from here.
         tillEuler.setFromQuaternion(tillQuat, "YXZ");
         player.setOrientation(tillEuler.y, tillEuler.x);
+        player.setLookLimits({ centerYaw: tillEuler.y, ...TILL_LOOK });
         cameraMode = "till";
       }
     } else {
@@ -431,10 +455,7 @@ function boot(): void {
     player.releaseKeys();
     // Keep pointer lock so mouse look works at the till.
     hideHover();
-    setCrosshairHidden(true);
-    hud.legend.hidden = false;
     hud.prompt.hidden = true;
-    hud.resume.hidden = true;
     glideToTill();
   };
 
@@ -455,14 +476,13 @@ function boot(): void {
     customers?.completeService(result.paid);
     tillAvatar = null;
     playerFrozen = false;
-    hud.legend.hidden = true;
+    zoomed = false;
     machine?.hover(null);
-    renderer.domElement.style.cursor = "";
+    player.setLookLimits(null);
     glideToPlayer();
-    // Browsers usually refuse a pointer-lock request outside a user gesture,
-    // so ask for one click to resume walking.
-    awaitingResume = true;
-    hud.resume.hidden = false;
+    // A voided sale leaves the mouse free, and browsers usually refuse a
+    // pointer-lock request outside a user gesture, so ask for one click.
+    awaitingResume = document.pointerLockElement !== renderer.domElement;
   };
 
   // -------------------------------------------------------------------------
@@ -483,12 +503,13 @@ function boot(): void {
     }
   });
 
-  const pointer = new THREE.Vector2();
-  const clickRaycaster = new THREE.Raycaster();
-  const toPointer = (event: MouseEvent): void => {
-    const rect = renderer.domElement.getBoundingClientRect();
-    pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
-    clickRaycaster.setFromCamera(pointer, camera);
+  const requestLock = (): void => {
+    try {
+      // Chrome rejects on denial / post-Esc cooldown; the next click retries.
+      (renderer.domElement.requestPointerLock() as Promise<void> | undefined)?.catch?.(() => {});
+    } catch {
+      // Pointer lock unavailable.
+    }
   };
   // Capture phase on the canvas: while the till is open this listener takes
   // the click (scanner, belt, bags, payment, drawer, tray) and stops it reaching the
@@ -499,16 +520,24 @@ function boot(): void {
     (event) => {
       if (!playerFrozen) return;
       event.stopImmediatePropagation();
+      // Mouse free at the till: this click only locks it again, it never acts.
+      if (document.pointerLockElement !== renderer.domElement) {
+        if (!paused && !machine?.isVoidPromptOpen()) requestLock();
+        return;
+      }
       if (!machine || cameraMode !== "till") return;
-      toPointer(event);
+      clickRaycaster.setFromCamera(raycastCenter, camera);
       machine.click(clickRaycaster);
     },
     true,
   );
-  renderer.domElement.addEventListener("mousemove", (event) => {
-    if (!playerFrozen || !machine || cameraMode !== "till") return;
-    toPointer(event);
-    renderer.domElement.style.cursor = machine.hover(clickRaycaster);
+  // Hold right-click at the till to zoom in.
+  renderer.domElement.addEventListener("contextmenu", (event) => event.preventDefault());
+  renderer.domElement.addEventListener("mousedown", (event) => {
+    if (event.button === 2 && cameraMode === "till" && !paused) zoomed = true;
+  });
+  window.addEventListener("mouseup", (event) => {
+    if (event.button === 2) zoomed = false;
   });
 
   // -------------------------------------------------------------------------
@@ -544,11 +573,11 @@ function boot(): void {
     if (document.pointerLockElement === renderer.domElement) {
       resumePlay();
       awaitingResume = false;
-      hud.resume.hidden = true;
       return;
     }
-    // Esc while walking → pause menu (the till and summary own their own UI).
-    if (!playerFrozen && !awaitingResume && !summaryOpen) {
+    zoomed = false;
+    // Esc while walking or serving → pause menu (the void dialog and summary own their own UI).
+    if (!awaitingResume && !summaryOpen && !machine?.isVoidPromptOpen()) {
       paused = true;
       menu.show("Paused");
     }
@@ -620,6 +649,12 @@ function boot(): void {
           toast: (text) => hud.toast(text),
         });
         machine.onComplete = onSaleComplete;
+        // The dialog's buttons need a free cursor; either answer locks it again
+        // (the button click is the user gesture pointer lock needs).
+        machine.onVoidPrompt = (open) => {
+          if (open) document.exitPointerLock();
+          else requestLock();
+        };
         colliders = [...colliders, ...machine.colliders()];
       } catch (error) {
         machine = null;
@@ -659,8 +694,8 @@ function boot(): void {
     requestAnimationFrame(animate);
     timer.update(timestamp);
     const dt = Math.min(timer.getDelta(), MAX_FRAME_DELTA_S);
-    // The world keeps moving at the till; the pause menu and summary stop it.
-    const simRunning = playerFrozen || !paused;
+    // The pause menu and summary stop the world, at the till too.
+    const simRunning = !paused;
 
     if (simRunning) {
       if (!playerFrozen && cameraMode === "player") player.update(dt);
@@ -694,6 +729,11 @@ function boot(): void {
       hud.prompt.hidden = true;
     }
     hud.banner.hidden = !(dayOver && customers?.storeEmpty() && !summaryOpen && !playerFrozen);
+    hud.legend.hidden = !playerFrozen || paused;
+    const relock = playerFrozen && !paused && document.pointerLockElement !== renderer.domElement && !machine?.isVoidPromptOpen();
+    hud.resume.hidden = !(relock || awaitingResume);
+    const resumeText = relock ? "Click to resume serving" : "Click to resume walking";
+    if (hud.resume.textContent !== resumeText) hud.resume.textContent = resumeText;
     renderChangePanel(cameraMode === "till" ? (machine?.changeStatus() ?? null) : null);
 
     syncHoverCandidates();
@@ -750,7 +790,7 @@ function buildHud(): Hud {
     <div>Click the bag stack to add a bag, a bag to take it back</div>
     <div>Click what the customer holds out to take payment</div>
     <div>Change: click the drawer, then the tray</div>
-    <div class="legend-foot"><kbd>Esc</kbd> void the sale</div>`;
+    <div class="legend-foot">Click: use · Right-click (hold): zoom · <kbd>Esc</kbd>: pause · VOID key on the screen: void the sale</div>`;
   document.body.appendChild(legend);
 
   const banner = document.createElement("div");

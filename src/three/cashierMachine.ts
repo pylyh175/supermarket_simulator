@@ -104,6 +104,8 @@ const PRINTER_SLOT_Y = TOP_Y + 0.08;
 
 const SCREEN_PX_W = 1024;
 const SCREEN_PX_H = 722;
+/** VOID key in the POS screen header (canvas px). */
+const VOID_KEY_PX = { x: SCREEN_PX_W - 152, y: 9, w: 140, h: 46 };
 const VFD_PX_W = 512;
 const VFD_PX_H = 128;
 
@@ -187,10 +189,11 @@ type PickHit =
   | { kind: "bagStack" }
   | { kind: "bag" }
   | { kind: "payment" }
+  | { kind: "void" }
   | { kind: "item"; mesh: THREE.Object3D; ready: boolean };
 
 /** userData.pick tags on clickable stand parts. */
-type PickTag = "scanner" | "bagStack" | "bag" | "tray";
+type PickTag = "scanner" | "bagStack" | "bag" | "tray" | "void";
 
 // ---------------------------------------------------------------------------
 // Piece meshes (notes / coins) — geometry + material cached per denomination
@@ -292,6 +295,8 @@ export class CashierMachine {
   readonly group = new THREE.Group();
   /** Fired when the sale finishes (paid) or is voided. */
   onComplete: ((result: SaleResult) => void) | null = null;
+  /** Fired when the void confirm dialog opens (true) or closes (false). */
+  onVoidPrompt: ((open: boolean) => void) | null = null;
 
   private readonly opts: CashierMachineOptions;
 
@@ -327,6 +332,10 @@ export class CashierMachine {
   private readonly placedBagGeo: THREE.BufferGeometry[];
   private readonly placedBagMat = lambert("#f4f4f2");
   private readonly voidPrompt: HTMLDivElement;
+  private readonly voidHit = new THREE.Mesh(
+    new THREE.PlaneGeometry((VOID_KEY_PX.w / SCREEN_PX_W) * MONITOR_W, (VOID_KEY_PX.h / SCREEN_PX_H) * MONITOR_H),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+  );
   private readonly receiptCard: HTMLDivElement;
 
   // State
@@ -500,11 +509,12 @@ export class CashierMachine {
     });
   }
 
-  /** Esc at the till: ask before voiding. */
+  /** VOID key on the screen: ask before voiding. */
   requestVoid(): void {
     if (!this.session || this.finishing) return;
     this.voidOpen = true;
     this.voidPrompt.hidden = false;
+    this.onVoidPrompt?.(true);
   }
 
   answerVoid(yes: boolean): void {
@@ -512,17 +522,17 @@ export class CashierMachine {
     this.voidOpen = false;
     this.voidPrompt.hidden = true;
     if (yes) this.voidSale();
+    this.onVoidPrompt?.(false);
   }
 
-  /** Keyboard input while the till is open: only Esc (void / cancel the void prompt). */
+  /** Keyboard input while the till is open: Esc closes the void prompt (keep serving). */
   handleKey(code: string): boolean {
-    if (code !== "Escape") return false;
-    if (this.voidOpen) this.answerVoid(false);
-    else this.requestVoid();
+    if (code !== "Escape" || !this.voidOpen) return false;
+    this.answerVoid(false);
     return true;
   }
 
-  /** Mouse click (pointer unlocked) — scanner, belt pack, bags, customer's payment, drawer, tray. */
+  /** Mouse click, aimed from the crosshair — scanner, belt pack, bags, customer's payment, drawer, tray. */
   click(raycaster: THREE.Raycaster): void {
     if (!this.session || this.voidOpen || this.finishing) return;
     const hit = this.pick(raycaster);
@@ -559,12 +569,15 @@ export class CashierMachine {
         return;
       case "tray":
         this.handOverTray();
+        return;
+      case "void":
+        this.requestVoid();
     }
   }
 
   /**
-   * Mouse move — the held scanner follows the cursor; highlight what a click
-   * would do. Returns the CSS cursor to show ("" = default).
+   * Every frame at the till — the held scanner follows the crosshair; highlight what a click
+   * would do. Returns "pointer" when a click would act, else "not-allowed" or "".
    */
   hover(raycaster: THREE.Raycaster | null): string {
     if (this.hovered) this.hovered.emissive.setHex(0x000000);
@@ -1083,6 +1096,7 @@ export class CashierMachine {
     // The held scanner sits under the cursor — never let it block its own aim.
     if (!this.scannerHeld) targets.push(this.gun);
     if (this.drawerZ > DRAWER_OPEN_M * 0.6) targets.push(...this.slotHits.values());
+    if (this.session && !this.finishing) targets.push(this.voidHit);
     let best: PickHit | null = null;
     let bestD = Infinity;
     const hit = raycaster.intersectObjects(targets, true)[0];
@@ -1195,7 +1209,19 @@ export class CashierMachine {
     ctx.fillText(`${STORE_NAME} · POS 01`, 22, 33);
     ctx.textAlign = "right";
     ctx.font = "700 28px system-ui, 'Segoe UI', sans-serif";
-    ctx.fillText(s ? (this.avatar?.customer.name ?? "") : this.clockLabel, W - 22, 33);
+    ctx.fillText(s ? (this.avatar?.customer.name ?? "") : this.clockLabel, s ? VOID_KEY_PX.x - 18 : W - 22, 33);
+    if (s) {
+      const k = VOID_KEY_PX;
+      ctx.fillStyle = "#7f1d1d";
+      ctx.fillRect(k.x, k.y, k.w, k.h);
+      ctx.strokeStyle = "#fecaca";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(k.x + 1, k.y + 1, k.w - 2, k.h - 2);
+      ctx.fillStyle = "#fff1f1";
+      ctx.textAlign = "center";
+      ctx.font = "800 26px system-ui, 'Segoe UI', sans-serif";
+      ctx.fillText("VOID", k.x + k.w / 2, k.y + k.h / 2 + 1);
+    }
 
     if (!s) {
       ctx.textAlign = "center";
@@ -1480,6 +1506,15 @@ export class CashierMachine {
     );
     screen.position.z = 0.0155;
     monitor.add(screen);
+    // Invisible hit box over the VOID key drawn in the screen's header.
+    const k = VOID_KEY_PX;
+    this.voidHit.position.set(
+      ((k.x + k.w / 2) / SCREEN_PX_W - 0.5) * MONITOR_W,
+      (0.5 - (k.y + k.h / 2) / SCREEN_PX_H) * MONITOR_H,
+      0.017,
+    );
+    this.voidHit.userData.pick = "void" satisfies PickTag;
+    monitor.add(this.voidHit);
     this.group.add(monitor);
   }
 

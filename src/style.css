@@ -94,6 +94,15 @@ body {
   z-index: 10;
   pointer-events: none;
   user-select: none;
+  transition: width 0.12s, height 0.12s, background 0.12s, border-color 0.12s;
+}
+
+/* Over something a click would use: grow into an amber ring. */
+#crosshair.active {
+  width: 14px;
+  height: 14px;
+  background: rgba(253, 246, 233, 0.15);
+  border: 2px solid #f0a020;
 }
 
 #item-tooltip {
