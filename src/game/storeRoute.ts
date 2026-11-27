@@ -1,17 +1,27 @@
 /**
  * Walkable routes for customers — a small waypoint graph over the store's
- * aisles (pure, no three.js). Customers only walk along these lanes, so they
- * never clip through shelves.
+ * aisles (pure, no three.js), built from src/game/storeGeometry.ts so it
+ * always matches the shelves. Customers only walk along these edges, so they
+ * never clip through shelves or counters (see tests/storeRoute.test.ts).
  *
- * Store (x −10..10, z −7..7): entrance doorway at (0, −7); shelf rows run
- * along z (−5.2..0.2) at x = −6.75, −2.25, 2.25, 6.75; the till's customer
- * spot is (0, 2.2) with the queue trailing back-west toward the aisles.
- *
- *   door ─ Nc ─ Nw / Ne                     (north cross-aisle, z = −6.1)
- *   lanes x = −4.5, 0, 4.5 run Nx → Sx      (aisles between rows)
- *   outer lanes x = ±8.6 dead-end at z = −4.4
- *   Sww ─ Sw ─ Sc ─ Se ─ See                (south cross-aisle, z = 0.9)
+ *   door (front-left) ─ west outer aisle ─ front cross-aisle (z 3.6)
+ *   every aisle: front cross-aisle → front-run bays → middle cross-aisle
+ *                → back-run bays → back cross-aisle
+ *   queue: Sc (front cross-aisle) → 6 slots, L-shaped, slot 0 at the till
+ *   exit:  till → exit → exitLane (beside the counter) → door
  */
+import {
+  COUNTER_W_M,
+  CROSS_AISLE_Z,
+  DOOR,
+  FACE_HALF_M,
+  FRONT_Z,
+  GONDOLA_XS,
+  TILL_X,
+  TILL_Z,
+  WALL_RUN_BACK_XS,
+  bayCenterZs,
+} from "./storeGeometry";
 
 export interface Point {
   x: number;
@@ -23,67 +33,66 @@ export interface BrowseStop {
   node: string;
   /** Where they stand, an arm's length from the shelf face. */
   stand: Point;
-  /** Point they look at (the shelf). */
+  /** Point they look at (the shelf lip). */
   look: Point;
 }
 
-const nodes: Record<string, Point> = {
-  door: { x: 0, z: -6.75 },
-  Nw: { x: -4.5, z: -6.1 },
-  Nc: { x: 0, z: -6.1 },
-  Ne: { x: 4.5, z: -6.1 },
-  Sww: { x: -8.6, z: 0.9 },
-  Sw: { x: -4.5, z: 0.9 },
-  Sc: { x: 0, z: 0.9 },
-  Se: { x: 4.5, z: 0.9 },
-  See: { x: 8.6, z: 0.9 },
-  exit: { x: 1.1, z: 1.75 },
-};
+/** How far from the shelf lip a browsing shopper stands. */
+const STAND_FROM_LIP_M = 0.55;
 
-const edges: [string, string][] = [
-  ["door", "Nc"],
-  ["Nw", "Nc"],
-  ["Nc", "Ne"],
-  ["Sww", "Sw"],
-  ["Sw", "Sc"],
-  ["Sc", "Se"],
-  ["Se", "See"],
-  ["exit", "Sc"],
-];
-
-const LANE_ZS = [-4.4, -2.5, -0.7];
-const lanes: { x: number; north: string | null; south: string; key: string }[] = [
-  { x: -4.5, north: "Nw", south: "Sw", key: "w" },
-  { x: 0, north: "Nc", south: "Sc", key: "c" },
-  { x: 4.5, north: "Ne", south: "Se", key: "e" },
-  { x: -8.6, north: null, south: "Sww", key: "ww" },
-  { x: 8.6, north: null, south: "See", key: "ee" },
-];
-
-/** Shelf faces either side of each lane: [standX, faceX] pairs. */
-const LANE_SHELVES: Record<string, [number, number][]> = {
-  w: [[-5.9, -6.5], [-3.1, -2.5]],
-  c: [[-1.45, -2.0], [1.45, 2.0]],
-  e: [[3.1, 2.5], [5.9, 6.5]],
-  ww: [[-7.6, -7.0]],
-  ee: [[7.6, 7.0]],
-};
-
+const nodes: Record<string, Point> = {};
+const edges: [string, string][] = [];
 const browseStops: BrowseStop[] = [];
 
-for (const lane of lanes) {
-  let previous = lane.north;
-  LANE_ZS.forEach((z, i) => {
-    const id = `L${lane.key}${i}`;
-    nodes[id] = { x: lane.x, z };
-    if (previous) edges.push([previous, id]);
-    previous = id;
-    for (const [standX, faceX] of LANE_SHELVES[lane.key]) {
-      browseStops.push({ node: id, stand: { x: standX, z }, look: { x: faceX, z } });
+// Aisles west → east: the outer aisles between the wall runs and the outer
+// gondolas, and one between each pair of gondolas. Each knows its two shelf lips.
+const westLip = WALL_RUN_BACK_XS[0] + FACE_HALF_M;
+const eastLip = WALL_RUN_BACK_XS[1] - FACE_HALF_M;
+const gondolaLips = GONDOLA_XS.map((x) => [x - FACE_HALF_M, x + FACE_HALF_M] as const);
+const aisles: { x: number; lips: [number, number] }[] = [];
+aisles.push({ x: (westLip + gondolaLips[0][0]) / 2, lips: [westLip, gondolaLips[0][0]] });
+for (let i = 1; i < GONDOLA_XS.length; i += 1) {
+  aisles.push({ x: (GONDOLA_XS[i - 1] + GONDOLA_XS[i]) / 2, lips: [gondolaLips[i - 1][1], gondolaLips[i][0]] });
+}
+aisles.push({ x: (gondolaLips[GONDOLA_XS.length - 1][1] + eastLip) / 2, lips: [gondolaLips[GONDOLA_XS.length - 1][1], eastLip] });
+
+const laneZs = [CROSS_AISLE_Z.front, ...bayCenterZs("front").reverse(), CROSS_AISLE_Z.middle, ...bayCenterZs("back").reverse(), CROSS_AISLE_Z.back];
+const crossIndex = new Set([0, 4, 8]); // front, middle, back cross-aisle positions in laneZs
+
+aisles.forEach((aisle, a) => {
+  laneZs.forEach((z, k) => {
+    const id = `A${a}_${k}`;
+    nodes[id] = { x: aisle.x, z };
+    if (k > 0) edges.push([`A${a}_${k - 1}`, id]);
+    if (crossIndex.has(k)) {
+      if (a > 0) edges.push([`A${a - 1}_${k}`, id]);
+      return;
+    }
+    for (const lip of aisle.lips) {
+      const dir = Math.sign(aisle.x - lip); // from the lip into the aisle
+      browseStops.push({ node: id, stand: { x: lip + dir * STAND_FROM_LIP_M, z }, look: { x: lip, z } });
     }
   });
-  if (previous) edges.push([previous, lane.south]);
-}
+});
+
+// Door at the front-left, joined to the west outer aisle's front cross-aisle node.
+nodes.door = { x: DOOR.x, z: FRONT_Z - 0.45 };
+edges.push(["door", "A0_0"]);
+
+// Queue join node: the front cross-aisle node nearest the queue's tail.
+const queueTailX = TILL_X + 2.25;
+let scIndex = 0;
+aisles.forEach((aisle, a) => {
+  if (Math.abs(aisle.x - queueTailX) < Math.abs(aisles[scIndex].x - queueTailX)) scIndex = a;
+});
+nodes.Sc = { ...nodes[`A${scIndex}_0`] };
+edges.push(["Sc", `A${scIndex}_0`]);
+
+// Paid customers leave through the lane beside the player's counter.
+const exitX = TILL_X - COUNTER_W_M / 2 - 0.8;
+nodes.exit = { x: exitX, z: TILL_Z - 0.85 };
+nodes.exitLane = { x: exitX, z: FRONT_Z - 0.7 };
+edges.push(["exit", "exitLane"], ["exitLane", "door"]);
 
 const adjacency = new Map<string, string[]>();
 for (const [a, b] of edges) {
@@ -96,12 +105,14 @@ for (const [a, b] of edges) {
 export const ROUTE_NODES: Readonly<Record<string, Point>> = nodes;
 export const BROWSE_STOPS: readonly BrowseStop[] = browseStops;
 
-/** Till customer spot, then the queue trailing west. Index 0 = being served. */
+/** Till customer spot, then the queue: straight back, then east. Index 0 = being served. */
 export const QUEUE_SLOTS: readonly Point[] = [
-  { x: 0, z: 2.2 },
-  { x: -0.85, z: 1.7 },
-  { x: -1.6, z: 1.45 },
-  { x: -2.35, z: 1.2 },
+  { x: TILL_X, z: TILL_Z - 0.85 },
+  { x: TILL_X, z: TILL_Z - 1.6 },
+  { x: TILL_X, z: TILL_Z - 2.35 },
+  { x: TILL_X + 0.75, z: TILL_Z - 2.35 },
+  { x: TILL_X + 1.5, z: TILL_Z - 2.35 },
+  { x: TILL_X + 2.25, z: TILL_Z - 2.35 },
 ];
 
 /** Shortest node path (inclusive) by BFS; [] when unreachable. */

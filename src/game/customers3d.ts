@@ -34,7 +34,7 @@ import {
 // Pacing
 // ---------------------------------------------------------------------------
 /** Shoppers in the building at once (browsing + queueing + at the till). */
-const MAX_IN_STORE = 5;
+const MAX_IN_STORE = 8;
 const FIRST_SPAWN_DELAY_S = 2.5;
 const WALK_SPEED_MPS = 1.1;
 const TURN_RATE_RAD_S = 7;

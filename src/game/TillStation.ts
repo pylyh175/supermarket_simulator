@@ -3,20 +3,16 @@
 // decides what E does there (open the till while a customer is waiting at
 // it, or close up once the day is over and the store is empty).
 import type * as THREE from "three";
-import { TILL_X, TILL_Z } from "../three/storeLayout";
+import { TILL_ZONE } from "./storeGeometry";
 
-// The counter spans roughly z ∈ [TILL_Z - 0.45, TILL_Z + 0.45]; the cashier
-// side starts just past that. The zone is generous on purpose — walking up
-// to the till and pressing E should always work (cozy, no fiddly aiming).
-const ZONE_HALF_WIDTH_M = 0.95; // x around TILL_X
-const ZONE_MIN_Z = TILL_Z + 0.5; // just past the counter's south face
-const ZONE_MAX_Z = TILL_Z + 1.9; // covers the spawn spot in front of the till
-
+// The zone sits on the cashier (+Z) side of the player's counter (see
+// storeGeometry.TILL_ZONE). It is generous on purpose — walking up to the
+// till and pressing E should always work (cozy, no fiddly aiming).
 export class TillStation {
-  private readonly minX = TILL_X - ZONE_HALF_WIDTH_M;
-  private readonly maxX = TILL_X + ZONE_HALF_WIDTH_M;
-  private readonly minZ = ZONE_MIN_Z;
-  private readonly maxZ = ZONE_MAX_Z;
+  private readonly minX = TILL_ZONE.minX;
+  private readonly maxX = TILL_ZONE.maxX;
+  private readonly minZ = TILL_ZONE.minZ;
+  private readonly maxZ = TILL_ZONE.maxZ;
 
   /**
    * True when the player is inside the till zone. Y is deliberately ignored
