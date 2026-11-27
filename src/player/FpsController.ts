@@ -12,6 +12,7 @@
 import * as THREE from "three";
 import { moveVector, eyeHeightM, type MoveKeys } from "./movement";
 import { circleAabbResolve, clampToBounds, type Aabb } from "./colliders";
+import { limitYaw, softLimit, type LookLimits } from "./lookLimits";
 
 // Comfortable cozy walking pace (brief: ~2.5–3 m/s). Diagonal is already
 // normalized inside moveVector, so diagonal walking is not faster.
@@ -41,6 +42,7 @@ export class FpsController {
   private sensitivity = 1;
   private yawRad = 0;   // 0 = facing -Z
   private pitchRad = 0; // 0 = level
+  private lookLimits: LookLimits | null = null;
 
   private readonly keys: MoveKeys = { forward: false, back: false, left: false, right: false };
   private readonly pos = new THREE.Vector3(SPAWN_X, eyeHeightM(), SPAWN_Z);
@@ -78,6 +80,11 @@ export class FpsController {
   setOrientation(yaw: number, pitch: number): void {
     this.yawRad = yaw;
     this.pitchRad = Math.max(-PITCH_LIMIT_RAD, Math.min(PITCH_LIMIT_RAD, pitch));
+  }
+
+  /** Hold mouse look within soft limits (the till), or null for free look. */
+  setLookLimits(limits: LookLimits | null): void {
+    this.lookLimits = limits;
   }
 
   /** Replace the active collider list (e.g. walls → walls + store props). */
@@ -127,9 +134,16 @@ export class FpsController {
 
   private readonly onMouseMove = (e: MouseEvent): void => {
     if (document.pointerLockElement !== this.canvas) return;
-    this.yawRad -= e.movementX * MOUSE_SENSITIVITY_RAD_PER_PX * this.sensitivity;
-    this.pitchRad -= e.movementY * MOUSE_SENSITIVITY_RAD_PER_PX * this.sensitivity;
-    this.pitchRad = Math.max(-PITCH_LIMIT_RAD, Math.min(PITCH_LIMIT_RAD, this.pitchRad));
+    const dYaw = -e.movementX * MOUSE_SENSITIVITY_RAD_PER_PX * this.sensitivity;
+    const dPitch = -e.movementY * MOUSE_SENSITIVITY_RAD_PER_PX * this.sensitivity;
+    const limits = this.lookLimits;
+    if (limits) {
+      this.yawRad = limitYaw(this.yawRad, dYaw, limits);
+      this.pitchRad = softLimit(this.pitchRad, dPitch, limits.pitchMin, limits.pitchMax);
+      return;
+    }
+    this.yawRad += dYaw;
+    this.pitchRad = Math.max(-PITCH_LIMIT_RAD, Math.min(PITCH_LIMIT_RAD, this.pitchRad + dPitch));
   };
 
   private readonly onKeyDown = (e: KeyboardEvent): void => {
