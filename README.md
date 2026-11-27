@@ -7,6 +7,9 @@ Cozy first-person Malaysian supermarket cashier simulation for the browser — s
 - `npm test` — run the unit suite
 - `npm run build` — type-check + production build into `dist/`
 
+## The store
+A 28 × 20 m neighbourhood pasaraya under bright strip lights. You enter through the glass shopfront at the front-left, past the Grab pick-up counter. Seven double-sided gondolas and wall shelving run front to back, packed tight: snacks, biscuits and drinks at the front; noodles, canned food, sauces and dry staples in the middle; household and personal care at the back. Every product has a price tag on its shelf edge. Three checkout counters face the store; yours is the one nearest the entrance, and the other two are closed. Each day starts behind your till.
+
 ## Playing a shift
 The store trades 9:00 AM – 10:00 PM, compressed into 8 / 12 / 20 real minutes (settings). Shoppers walk in (door chime), browse the aisles, queue at the till, and leave with their bag. It gets busier at lunch and after work. At 10 PM the doors close; once the last customer is served, press **E** at the till to close up and see the day's summary and drawer count.
 
