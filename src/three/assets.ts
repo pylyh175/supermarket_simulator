@@ -21,7 +21,6 @@ import { FALLBACK_PACK_SPEC, PACK_SPECS, type PackSpec } from "../data/packSpecs
 
 export interface AssetBundle {
   products: Map<string, THREE.Group>;
-  shelves: THREE.Group[];
   counter: THREE.Group;
   signage: { kedaiSign: THREE.Mesh; grabSign: THREE.Mesh };
 }
@@ -33,16 +32,12 @@ export type AssetStageCallback = (label: string, progress: number) => void;
 // glTF manifest — the only third-party files we ship. CC0, Kenney.nl.
 // ---------------------------------------------------------------------------
 const GLTF_MANIFEST = {
-  shelfTall: { url: "/assets/furniture-kit/bookcaseOpen.glb", targetHeightM: 2.0 },
-  shelfLow: { url: "/assets/furniture-kit/bookcaseOpenLow.glb", targetHeightM: 1.1 },
   counter: { url: "/assets/furniture-kit/kitchenBar.glb", targetHeightM: 0.95 },
 } as const;
 
 const GLTF_TIMEOUT_MS = 6000;
 
 // Shared warm wood / cream palette (matches storeShell + plan constants).
-const WOOD_COLOR = "#8a5a2e";
-const WOOD_DARK = "#5f3d1e";
 const COUNTER_CREAM = "#e8e2d6";
 const COUNTER_TOP = "#7a5a36";
 const GRAB_GREEN = "#00aa5b";
@@ -242,7 +237,7 @@ function makeRoundLabel(spec: PackSpec, seed: string, capFrom: number, labelTo: 
 
 /** Lathe profile sampled evenly in height so the texture's v = height fraction. */
 function latheProfile(radius: number, height: number, radiusAt: (t: number) => number): THREE.Vector2[] {
-  const samples = 30;
+  const samples = 10; // ~24k packs on the shelves: keep bottles low-poly (144 tris)
   const points: THREE.Vector2[] = [];
   for (let i = 0; i < samples; i += 1) {
     const t = i / (samples - 1);
@@ -268,6 +263,30 @@ function jarRadius(t: number): number {
   if (t < 0.84) return 0.94;
   if (t < 0.97) return 0.98;
   return 0.98 * (1 - (t - 0.97) / 0.03);
+}
+
+/**
+ * Reorder a BoxGeometry's index so faces sharing a material are contiguous,
+ * leaving one draw group per material instead of six (~24k instanced packs:
+ * every group is a draw call per InstancedMesh). `faceMaterial[f]` is the
+ * material index of face f in BoxGeometry order (+x, −x, +y, −y, +z, −z).
+ */
+function groupBoxFaces(geometry: THREE.BoxGeometry, faceMaterial: readonly number[]): THREE.BoxGeometry {
+  const index = geometry.getIndex()!;
+  const source = Array.from(index.array);
+  const perFace = source.length / 6;
+  const order: number[] = [];
+  geometry.clearGroups();
+  const materialCount = Math.max(...faceMaterial) + 1;
+  for (let m = 0; m < materialCount; m += 1) {
+    const start = order.length;
+    faceMaterial.forEach((mat, f) => {
+      if (mat === m) order.push(...source.slice(f * perFace, (f + 1) * perFace));
+    });
+    geometry.addGroup(start, order.length - start, m);
+  }
+  geometry.setIndex(order);
+  return geometry;
 }
 
 function buildProduct(productId: string, name: string): THREE.Group {
@@ -302,7 +321,7 @@ function buildProduct(productId: string, name: string): THREE.Group {
       ? makeRoundLabel(spec, productId, 0.86, 0.58, 0.14)
       : makeRoundLabel(spec, productId, 0.82, 0.74, 0.12);
     const mesh = new THREE.Mesh(
-      new THREE.LatheGeometry(latheProfile(diameter / 2, height, isBottle ? bottleRadius : jarRadius), 16),
+      new THREE.LatheGeometry(latheProfile(diameter / 2, height, isBottle ? bottleRadius : jarRadius), 8),
       new THREE.MeshLambertMaterial({ map: texture }),
     );
     // Lathe geometry already stands on y = 0 — no lift.
@@ -318,52 +337,20 @@ function buildProduct(productId: string, name: string): THREE.Group {
   const labelMat = new THREE.MeshLambertMaterial({ map: makeProductLabel(spec, productId), flatShading: true });
   const topMat = labelOnTop ? labelMat : lambert(spec.body);
   const faceMat = labelOnTop ? sideMat : labelMat;
-  // Box faces: +x, -x, +y, -y, +z, -z.
-  const materials = [sideMat, sideMat, topMat, sideMat, faceMat, sideMat];
-  const box = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), materials);
+  // Box faces: +x, -x, +y, -y, +z, -z → materials 0 side, 1 top, 2 face.
+  const box = new THREE.Mesh(groupBoxFaces(new THREE.BoxGeometry(width, height, depth), [0, 0, 1, 0, 2, 0]), [
+    sideMat,
+    topMat,
+    faceMat,
+  ]);
   box.position.y = height / 2;
   group.add(box);
   return group;
 }
 
 // ---------------------------------------------------------------------------
-// Procedural shelf + counter (fallbacks, also used when glTFs are absent).
+// Procedural counter (fallback when the glTF is absent).
 // ---------------------------------------------------------------------------
-function buildShelfProcedural(low: boolean): THREE.Group {
-  const group = new THREE.Group();
-  group.name = low ? "shelf:low" : "shelf:tall";
-  const width = 1.6;
-  const depth = 0.5;
-  const height = low ? 1.1 : 1.9;
-  const post = 0.08;
-  const boardThickness = 0.05;
-
-  const woodMat = new THREE.MeshLambertMaterial({ color: WOOD_COLOR, flatShading: true });
-  const boardMat = new THREE.MeshLambertMaterial({ color: WOOD_DARK, flatShading: true });
-
-  const addBox = (
-    w: number, h: number, d: number,
-    x: number, y: number, z: number,
-    mat: THREE.MeshLambertMaterial,
-  ): void => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-  };
-
-  const halfW = width / 2 - post / 2;
-  const halfD = depth / 2 - post / 2;
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      addBox(post, height, post, sx * halfW, height / 2, sz * halfD, woodMat);
-    }
-  }
-  const boardYs = low ? [0.32, 0.68, height - boardThickness / 2] : [0.35, 0.95, 1.5, height - boardThickness / 2];
-  for (const y of boardYs) {
-    addBox(width, boardThickness, depth, 0, y, 0, boardMat);
-  }
-  return group;
-}
 
 function buildCounterProcedural(): THREE.Group {
   const group = new THREE.Group();
@@ -528,7 +515,6 @@ function buildEmergencyBundle(onStage?: AssetStageCallback): AssetBundle {
   onStage?.("Dibuka! Selamat datang…", 1);
   return {
     products,
-    shelves: [buildShelfProcedural(false), buildShelfProcedural(true)],
     counter: buildCounterProcedural(),
     signage: {
       kedaiSign: plainSign(SIGN_WOOD_BG, 3.4, 0.995, "signage:store-sign"),
@@ -551,21 +537,16 @@ export async function loadAssets(onStage?: AssetStageCallback): Promise<AssetBun
     }
     onStage?.("Memajang produk…", 0.45);
 
-    // Shelves + counter: prefer the Kenney CC0 glTFs, fall back per asset.
+    // Counter: prefer the Kenney CC0 glTF, fall back to procedural.
     onStage?.("Menyusun rak & kaunter…", 0.6);
-    const [shelfTall, shelfLow, counterGltf] = await Promise.all([
-      loadGltfGroup(GLTF_MANIFEST.shelfTall.url, GLTF_MANIFEST.shelfTall.targetHeightM),
-      loadGltfGroup(GLTF_MANIFEST.shelfLow.url, GLTF_MANIFEST.shelfLow.targetHeightM),
-      loadGltfGroup(GLTF_MANIFEST.counter.url, GLTF_MANIFEST.counter.targetHeightM),
-    ]);
-    const shelves = [shelfTall ?? buildShelfProcedural(false), shelfLow ?? buildShelfProcedural(true)];
+    const counterGltf = await loadGltfGroup(GLTF_MANIFEST.counter.url, GLTF_MANIFEST.counter.targetHeightM);
     const counter = counterGltf ?? buildCounterProcedural();
 
     onStage?.("Menggantung papan tanda…", 0.85);
     const signage = { kedaiSign: buildKedaiSign(), grabSign: buildGrabSign() };
 
     onStage?.("Dibuka! Selamat datang…", 1);
-    return { products, shelves, counter, signage };
+    return { products, counter, signage };
   } catch (error) {
     console.error("[assets] Unexpected failure — using plain emergency bundle.", error);
     return buildEmergencyBundle(onStage);

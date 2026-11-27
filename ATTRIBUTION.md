@@ -20,12 +20,10 @@ shipped **unmodified** at `public/assets/furniture-kit/` with the kit's
 
 | File (`public/assets/furniture-kit/`) | Used for |
 | --- | --- |
-| `bookcaseOpen.glb` | Tall gondola shelf archetype (scaled to 2.0 m at load) |
-| `bookcaseOpenLow.glb` | Low gondola shelf archetype (scaled to 1.1 m at load) |
 | `kitchenBar.glb` | Checkout counter candidate (scaled to 0.95 m at load) |
 | `License.txt` | The kit's CC0 license text, unmodified |
 
-Only these four files are shipped — the full pack (140 models) is not in the
+Only these two files are shipped — the full pack (140 models) is not in the
 repo. Shelf/counter glTFs are loaded at runtime and **fall back to procedural
 primitives automatically** if missing or unloadable (see
 `src/three/assets.ts`), so the game boots with zero downloads as well.
