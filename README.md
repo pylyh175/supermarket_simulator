@@ -16,11 +16,14 @@ The store trades 9:00 AM – 10:00 PM, compressed into 8 / 12 / 20 real minutes 
 - **E** at the till — serve the customer waiting there.
 
 ### At the till
-Everything is done with the mouse. The only key is **Esc** — void the transaction (asks first; Esc again keeps serving).
+Everything is done with the mouse: aim with the white dot in the middle of the screen. It turns into an amber ring over anything a click would use (shelf products too). You stay at the till; look around within a limited range.
+
+- Click — use what the dot points at · Right-click (hold) — zoom in · Esc — pause
+- To void the transaction, click the **VOID** key on the till screen (asks first; Esc keeps serving).
 
 | Click | Action |
 | --- | --- |
-| The handheld scanner (beside the belt) | Pick it up / put it back. It follows the cursor while held |
+| The handheld scanner (beside the belt) | Pick it up / put it back. It follows the dot while held |
 | The pack at the scan line (scanner in hand) | Scan it — the scanner dips over the pack and beeps |
 | The stack of plastic bags | Add a 20-sen bag (match what the customer asked for) |
 | A placed bag | Take that bag back off the bill |
