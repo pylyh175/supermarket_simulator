@@ -35,8 +35,9 @@ import {
   FACE_USABLE_M,
   FACING_GAP_M,
   SKU_PACK_SIZE_M,
-  type Facing,
-  type PlacementCell,
+  computeFacings,
+  faceSkus,
+  type FaceSlot,
 } from "./planogram";
 
 // ---------------------------------------------------------------------------
@@ -46,14 +47,13 @@ import {
 /** Tag plate size, metres (fits a two-line label legible at ~2 m). */
 const TAG_WIDTH_M = 0.28;
 const TAG_HEIGHT_M = 0.095;
-/**
- * Tag centre above the board surface: half the tag height (0.048 m) plus a
- * hair so the bottom edge clears the board top — the brief's 0.05 m.
- */
-const TAG_CENTER_ABOVE_BOARD_M = 0.05;
 /** How proud of the board lip / pack face the tag plane sits (anti z-fight + readability). */
-const TAG_PROUD_M = 0.008;
-/** Shared tag plane geometry — one per facing, identical size. */
+const TAG_PROUD_M = 0.016; // in front of the 12 mm price strip
+/** Tag centre below the board top: the tag sits on the shelf's price strip. */
+const TAG_CENTER_BELOW_BOARD_M = 0.035;
+/** Clearance left between neighbouring tags. */
+const TAG_SIDE_GAP_M = 0.01;
+/** Shared tag plane geometry — instanced per SKU, scaled down for narrow runs. */
 const TAG_GEOMETRY = new THREE.PlaneGeometry(TAG_WIDTH_M, TAG_HEIGHT_M);
 
 /** Canvas resolution; 256×96 keeps the text sharp at glancing angles. */
@@ -210,48 +210,62 @@ function buildTagTexture(skuId: string): THREE.CanvasTexture {
 // Public entry point.
 // ---------------------------------------------------------------------------
 
+const TAG_MATRIX = new THREE.Matrix4();
+const TAG_POSITION = new THREE.Vector3();
+const TAG_QUATERNION = new THREE.Quaternion();
+const TAG_SCALE = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+
 /**
- * Add one rail tag per facing to `scene`, grouped per board-face. `face`
- * mirrors the fill direction used by `computePlacements`; `side` is the x
- * sign of the face normal. Tags are single-sided planes whose normal faces
- * outward, so text is never mirrored from behind.
+ * Add the store's rail tags to `scene`: one tag per contiguous run of the
+ * same SKU on each face (centred on that run), drawn as one InstancedMesh
+ * per SKU that shares a cached texture. A tag narrower than its run is
+ * never needed; a run narrower than the tag scales the tag down so
+ * neighbours never overlap. Tags are single-sided planes facing outward,
+ * so text is never mirrored from behind.
  */
-export function buildRailTags(
-  scene: THREE.Scene,
-  facings: Facing[],
-  face: "front" | "back",
-  cell: PlacementCell,
-  side: 1 | -1,
-): void {
-  if (facings.length === 0) return;
-
-  const direction = face === "front" ? 1 : -1;
-  const startZ = cell.centerZ - direction * (FACE_USABLE_M / 2);
-  const rotationY = side > 0 ? Math.PI / 2 : -Math.PI / 2;
-
-  const group = new THREE.Group();
-  group.name = `rail-tags:${face}:side${side}:rowX${cell.rowX.toFixed(2)}:boardY${cell.boardY.toFixed(3)}`;
-
-  let cursor = 0; // mirrors the fill cursor in computePlacements
-  for (const facing of facings) {
-    const facingCenterZ = startZ + direction * (cursor + facing.widthM / 2);
-    cursor += facing.widthM + FACING_GAP_M;
-
-    // Overhang packs (the only SKUs deeper than a half-board) stick past the
-    // lip; step their tag out just past the pack face so it is never swallowed.
-    const size = SKU_PACK_SIZE_M[facing.skuId];
-    const packFrontM = size && size[2] > FACE_HALF_M ? size[2] : FACE_HALF_M;
-    const x = cell.rowX + side * (packFrontM + TAG_PROUD_M);
-
-    const texture = buildTagTexture(facing.skuId);
-    const material = new THREE.MeshLambertMaterial({ map: texture, side: THREE.FrontSide });
-    const plane = new THREE.Mesh(TAG_GEOMETRY, material);
-    plane.name = `rail-tag:${facing.skuId}`;
-    plane.userData.isRailTag = true; // 5 cm-thick print, never a hover target — excluded from raycasts (see collectHoverCandidates)
-    plane.position.set(x, cell.boardY + TAG_CENTER_ABOVE_BOARD_M, facingCenterZ);
-    plane.rotation.y = rotationY;
-    group.add(plane);
+export function buildRailTags(scene: THREE.Scene, slots: readonly FaceSlot[]): void {
+  const matricesBySku = new Map<string, THREE.Matrix4[]>();
+  for (const slot of slots) {
+    const facings = computeFacings(faceSkus(slot), FACE_USABLE_M);
+    const direction = slot.side > 0 ? 1 : -1; // front fills +z, back mirrors (as computePlacements)
+    const startZ = slot.centerZ - direction * (FACE_USABLE_M / 2);
+    TAG_QUATERNION.setFromAxisAngle(UP, slot.side > 0 ? Math.PI / 2 : -Math.PI / 2);
+    let cursor = 0;
+    for (let i = 0; i < facings.length; ) {
+      // Contiguous facings of one SKU share a single tag.
+      const skuId = facings[i].skuId;
+      const runStart = cursor;
+      let runEnd = cursor;
+      while (i < facings.length && facings[i].skuId === skuId) {
+        runEnd = cursor + facings[i].widthM;
+        cursor = runEnd + FACING_GAP_M;
+        i += 1;
+      }
+      const runWidth = runEnd - runStart;
+      const size = SKU_PACK_SIZE_M[skuId];
+      const packFrontM = size && size[2] > FACE_HALF_M ? size[2] : FACE_HALF_M;
+      const scale = Math.min(1, (runWidth - TAG_SIDE_GAP_M) / TAG_WIDTH_M);
+      TAG_POSITION.set(
+        slot.rowX + slot.side * (packFrontM + TAG_PROUD_M),
+        slot.boardY - TAG_CENTER_BELOW_BOARD_M,
+        startZ + direction * (runStart + runWidth / 2),
+      );
+      TAG_SCALE.set(scale, scale, 1);
+      TAG_MATRIX.compose(TAG_POSITION, TAG_QUATERNION, TAG_SCALE);
+      const list = matricesBySku.get(skuId);
+      if (list) list.push(TAG_MATRIX.clone());
+      else matricesBySku.set(skuId, [TAG_MATRIX.clone()]);
+    }
   }
-
-  scene.add(group);
+  for (const [skuId, matrices] of matricesBySku) {
+    const material = new THREE.MeshLambertMaterial({ map: buildTagTexture(skuId), side: THREE.FrontSide });
+    const mesh = new THREE.InstancedMesh(TAG_GEOMETRY, material, matrices.length);
+    mesh.name = `rail-tags:${skuId}`;
+    mesh.userData.isRailTag = true; // printed tag, never a hover target (see collectHoverCandidates)
+    matrices.forEach((m, k) => mesh.setMatrixAt(k, m));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    scene.add(mesh);
+  }
 }

@@ -7,59 +7,55 @@
  * `computePlacements` to clone product archetypes into the scene; keeping the
  * math three-free means it stays unit-testable.
  *
- * Layout context (see src/three/storeLayout.ts):
- *   - interior 20 m (x −10..10) × 14 m (z −7..7); aisle rows run along Z at
- *     x = −6.75, −2.25, 2.25, 6.75, length ROW_LENGTH_M (5.4 m).
- *   - usable face = ROW_LENGTH_M − 2 × ROW_STOCK_MARGIN_M = 4.6 m — mirrored
- *     here as FACE_USABLE_M (storeLayout imports three, so it cannot be
- *     imported from this pure module).
- *   - row index 1 is the low archetype; tall rows stock 3 boards × 2 sides,
- *     the low row 1 board × 2 sides → 18 + 2 = 20 faces.
+ * Layout context (see src/game/storeGeometry.ts):
+ *   - 7 double-sided gondolas + 2 single-sided wall runs, each split into a
+ *     back and a front run of 3 bays (1.25 m). Every bay has 5 shelves.
+ *   - One face = one shelf of one bay on one side: 7 x 2 x 3 x 5 x 2 +
+ *     2 x 2 x 3 x 5 = 480 faces (FACE_SLOTS). Usable face = FACE_USABLE_M.
+ *   - Each run belongs to a department (RUN_DEPARTMENTS); the face's SKU
+ *     list is one of that department's groups, packed by fillFaceList.
  *
  * Pack sizes and units-per-facing are derived from the shared pure table
  * in src/data/packSpecs.ts (the same table the 3D pack builder reads).
  *
- * Planogram design (documented judgment calls, per the task brief):
- *   - PLANOGRAM is built from FACE_PLAN (one category group per face) by
- *     fillFaceList: greedy cycling, then a 1 mm knapsack over the group +
- *     small filler packs so every face reaches ≥ 96 % fill.
- *   - 20 faces are enumerated row-major (row → board → side) by
- *     FACE_ENUMERATION; faceIndex % PLANOGRAM.length selects the SKU list.
- *     sideIndex 0 = the front face (fills −z → +z), sideIndex 1 = the back
- *     face (fills +z → −z, mirrored so both aisles read left-to-right the
- *     same). `computePlacements(face: "front" | "back", side: 1 | -1)` maps
- *     front ≙ sideIndex 0, back ≙ sideIndex 1; `side` is the x sign of the
- *     face normal (side 1 = +x / east face, rotationY = +π/2).
+ * Planogram design:
+ *   - Each face is planned by fillFaceList: the lead SKU of the face's
+ *     department group takes the first facing, then an unbounded knapsack
+ *     (1 mm resolution) packs the rest from (sku, units) options of the
+ *     group, the whole department and small filler packs, so every face
+ *     reaches >= 96 % fill. Facings are 0.2-0.45 m wide; the face entry
+ *     carries its own unit count (FaceEntry).
+ *   - side +1 (east face) fills -z to +z ("front"); side -1 mirrors
+ *     ("back") so both aisles read the same way. rotationY = side x pi/2.
  *
  * Fill rules:
- *   - Greedy: walk the SKU list, pack each SKU into one facing of
- *     UNITS_WIDE[sku] packs side by side; facing width = UNITS_WIDE × pack
- *     width. A ~0.1 m gap (FACING_GAP_M) separates facings; units inside a
- *     facing sit flush (zero gap).
- *   - Greedy skips a SKU whose facing does not fit the remaining span and
- *     keeps walking — a later, smaller SKU is still placed when it fits; the
- *     walk only ends when every remaining list entry has been tried (or the
- *     list is exhausted). Never overflows the face.
- *   - Depth is auto-clamped per SKU to one half-board: the largest d ∈ {3,2,1}
- *     with d × packDepth + (d − 1) × GAP_M ≤ FACE_HALF_M (0.25 m, board is
- *     0.5 m deep, centred on the row centre plane). PACK_DEPTH_TWO_M is kept
- *     verbatim from the brief for contract continuity but no longer drives
- *     depth.
- *   - Any pack deeper than a half-board is placed 1-DEEP flush with the
- *     INNER edge on the row centre plane (x = rowX ± packDepth/2):
- *     roti-canai-frozen (0.28 m) overhangs the board's front lip toward the
- *     customer and NEVER crosses into the opposite face's half.
- *   - Containment guarantee: normal rows sit at
- *     x_j = side × (FACE_HALF_M − packDepth/2 − j × (packDepth + GAP_M)),
- *     which keeps each row's inner face at x ≥ 0 relative to the row centre
- *     plane for side +1 (mirrored for −1); overhang packs sit at
- *     x = side × packDepth/2 (inner face exactly on the centre plane). The
- *     two faces of a double-sided board never share space. (Front row's
- *     outer face is flush with the board lip.)
- *   - Fill ratio for the tables above: 97.5 %–100 % (see tests).
+ *   - Units inside a facing sit flush; FACING_GAP_M (1 cm) separates
+ *     facings. computeFacings skips a facing that does not fit and keeps
+ *     walking; it never overflows the face.
+ *   - Depth: the largest d <= MAX_DEPTH with d x packDepth + (d - 1) x GAP_M
+ *     <= STOCK_DEPTH_M — stocked front to back.
+ *   - Rows sit at x_j = rowX + side x (FACE_HALF_M - packDepth/2 - j x
+ *     (packDepth + GAP_M)): the front row is flush with the shelf lip and
+ *     every row stays on its own side of the centre plane / back panel.
+ *     (A pack deeper than FACE_HALF_M would sit 1-deep against the centre
+ *     plane; none exists today.)
  */
 import { PRODUCTS } from "../data/products";
 import { FALLBACK_PACK_SPEC, PACK_SPECS, unitsWideFor } from "../data/packSpecs";
+import {
+  FACE_HALF_M,
+  FACE_USABLE_M,
+  GONDOLA_XS,
+  RUNS,
+  SHELF_YS,
+  STOCK_DEPTH_M,
+  WALL_RUN_BACK_XS,
+  bayCenterZs,
+  shelfClearanceM,
+  type RunId,
+} from "./storeGeometry";
+
+export { FACE_HALF_M, FACE_USABLE_M };
 
 // ---------------------------------------------------------------------------
 // Interfaces (task-brief contract).
@@ -69,10 +65,20 @@ export interface Facing {
   skuId: string;
   /** Front-to-back extent of the facing: depth × pack depth + (depth − 1) × GAP_M, in metres. */
   lengthM: number;
-  /** Pack rows deep, 1–3; auto-clamped to one half-board (see FACE_HALF_M / GAP_M). */
-  depth: 1 | 2 | 3;
-  /** widthM = UNITS_WIDE[skuId] × pack width of the SKU, in metres. */
+  /** Pack rows deep, 1..MAX_DEPTH; as many as fit STOCK_DEPTH_M. */
+  depth: number;
+  /** Packs side by side in this facing. */
+  unitsWide: number;
+  /** widthM = unitsWide × pack width of the SKU, in metres. */
   widthM: number;
+}
+
+/** One planned facing: a SKU id (default unit count) or a SKU with an explicit unit count. */
+export type FaceEntry = string | { sku: string; units: number };
+
+/** SKU id of a face entry. */
+export function entrySku(entry: FaceEntry): string {
+  return typeof entry === "string" ? entry : entry.sku;
 }
 
 /**
@@ -89,7 +95,7 @@ export interface Placement {
   x: number;
   y: number;
   z: number;
-  depth: 1 | 2 | 3;
+  depth: number;
   rotationY: number;
 }
 
@@ -97,34 +103,16 @@ export interface Placement {
 // Named constants.
 // ---------------------------------------------------------------------------
 
-/**
- * Kept verbatim from the task brief for contract continuity. Depth is no
- * longer derived from this constant (see the per-SKU clamp in the header).
- */
-export const PACK_DEPTH_TWO_M = 0.20;
-/** Board half-depth: the board is 0.5 m deep, 0.25 m per side of the row centre plane. */
-export const FACE_HALF_M = 0.25;
 /** Gap between depth rows within a facing (keeps unit rows readable). */
 export const GAP_M = 0.005;
-/** ~0.1 m gap between facings (units inside a facing sit flush). */
-export const FACING_GAP_M = 0.1;
-/** Usable face width — mirrors ROW_LENGTH_M − 2 × ROW_STOCK_MARGIN_M. */
-export const FACE_USABLE_M = 4.6;
-/** Minimum acceptable fill ratio for hand-authored face lists. */
+/** 1 cm between facings (units inside a facing sit flush) — tight packing. */
+export const FACING_GAP_M = 0.01;
+/** Deepest a facing is stocked, front to back. */
+export const MAX_DEPTH = 6;
+/** Minimum acceptable fill ratio for every face. */
 export const MIN_FACE_FILL_RATIO = 0.96;
 /** Lift products a hair off the board top to avoid z-fighting. */
 export const PACK_Y_EPSILON_M = 0.002;
-/** Stocked boards per tall row (top boards are excluded as too high). */
-export const TALL_ROW_BOARD_COUNT = 3;
-/** Low row: a single stocked board keeps the open sightline. */
-export const LOW_ROW_BOARD_COUNT = 1;
-/** Boards per row index 0..3 (index 1 is the low row). */
-export const ROW_BOARD_COUNTS: readonly number[] = [
-  TALL_ROW_BOARD_COUNT,
-  LOW_ROW_BOARD_COUNT,
-  TALL_ROW_BOARD_COUNT,
-  TALL_ROW_BOARD_COUNT,
-];
 
 /** Fit tolerance for the greedy fill (metres) — absorbs float dust at 4.6 m. */
 const FIT_EPSILON_M = 1e-6;
@@ -142,83 +130,128 @@ export const UNITS_WIDE: Record<string, number> = Object.fromEntries(
   PRODUCTS.map((p) => [p.id, unitsWideFor(PACK_SPECS[p.id] ?? FALLBACK_PACK_SPEC)]),
 );
 
+export type Department =
+  | "drinks"
+  | "snacks"
+  | "noodles"
+  | "canned"
+  | "condiments"
+  | "staples"
+  | "dairy"
+  | "household"
+  | "personal";
+
 /**
- * Category plan, one SKU group per board face (20 faces, row-major — see
- * FACE_ENUMERATION). Row 0 = drinks & dairy, row 1 (low) = rice / oil /
- * sugar, row 2 = noodles, bread, condiments, snacks, row 3 = household,
- * eggs and frozen.
+ * Department per run, keyed unit:run — gondolas g0..g6 west to east,
+ * wW / wE the wall runs. Front runs sell the impulse buys (snacks, drinks),
+ * back runs the staples and household goods.
  */
-const FACE_PLAN: readonly (readonly string[])[] = [
-  // Row 0 (x = −6.75, tall): beverages & dairy
-  ["isotonic-1-5l", "mineral-1-5l", "sirap-ros-2l"],
-  ["mineral-1-5l", "isotonic-1-5l", "soya-1l"],
-  ["milo-400g", "kopi-3in1", "teh-tarik-3in1"],
-  ["susu-fullcream", "soya-1l", "susu-pekat"],
-  ["kopi-3in1", "teh-tarik-3in1", "milo-400g", "susu-pekat"],
-  ["butter-250g", "susu-pekat", "milo-400g"],
-  // Row 1 (x = −2.25, low): heavy staples
-  ["beras-5kg", "minyak-2kg", "gula-1kg"],
-  ["beras-5kg", "tepung-1kg", "garam-500g", "minyak-2kg"],
-  // Row 2 (x = 2.25, tall): noodles, bread, condiments, snacks
-  ["maggi-curry", "mi-ayam-5pk", "mee-hoon"],
-  ["roti-putih", "kaya-pandan", "kuih-bahulu", "nasi-lemak-bungkus"],
-  ["kicap-manis", "sos-cili", "sambal-bilis"],
-  ["sardin-425g", "belacan-250g", "ikan-bilis-200g"],
-  ["cream-crackers", "keropok-ikan", "kuih-bahulu"],
-  ["maggi-curry", "mi-ayam-5pk", "roti-canai-frozen"],
-  // Row 3 (x = 6.75, tall): household, eggs, frozen
-  ["detergent-1-8kg", "tisu-tandas-10"],
-  ["tisu-tandas-10", "pencuci-pinggan", "detergent-1-8kg"],
-  ["telur-30-tray", "telur-10pk", "roti-canai-frozen"],
-  ["soap-bar", "ubat-gigi", "bicarbonate-250g", "pencuci-pinggan"],
-  ["gula-1kg", "tepung-1kg", "garam-500g", "minyak-2kg"],
-  ["soap-bar", "ubat-gigi", "bicarbonate-250g", "keropok-ikan"],
-];
+export const RUN_DEPARTMENTS: Record<string, Department> = {
+  "g0:front": "drinks", "g1:front": "drinks", "g2:front": "snacks", "g3:front": "snacks",
+  "g4:front": "noodles", "g5:front": "canned", "g6:front": "condiments",
+  "wW:front": "drinks", "wE:front": "snacks",
+  "g0:back": "staples", "g1:back": "staples", "g2:back": "condiments", "g3:back": "dairy",
+  "g4:back": "household", "g5:back": "household", "g6:back": "personal",
+  "wW:back": "staples", "wE:back": "household",
+};
+
+/** SKU groups per department; a face takes one group (see faceSkus). */
+export const DEPARTMENT_GROUPS: Record<Department, string[][]> = {
+  drinks: [
+    ["isotonic-1-5l", "mineral-1-5l", "sirap-ros-2l"],
+    ["soya-1l", "milo-400g", "kopi-3in1", "teh-tarik-3in1"],
+    ["mineral-1-5l", "isotonic-1-5l", "soya-1l"],
+  ],
+  snacks: [
+    ["cream-crackers", "keropok-ikan", "kuih-bahulu"],
+    ["nasi-lemak-bungkus", "kuih-bahulu", "cream-crackers"],
+    ["roti-putih", "kaya-pandan", "keropok-ikan"],
+  ],
+  noodles: [
+    ["maggi-curry", "mi-ayam-5pk", "mee-hoon"],
+    ["mi-ayam-5pk", "maggi-curry"],
+  ],
+  canned: [
+    ["sardin-425g", "susu-pekat", "sambal-bilis"],
+    ["sardin-425g", "kaya-pandan", "susu-pekat"],
+  ],
+  condiments: [
+    ["kicap-manis", "sos-cili", "sambal-bilis"],
+    ["belacan-250g", "ikan-bilis-200g", "kicap-manis"],
+  ],
+  staples: [
+    ["beras-5kg", "minyak-2kg", "gula-1kg"],
+    ["tepung-1kg", "garam-500g", "minyak-2kg", "gula-1kg"],
+  ],
+  // Chilled lines sit on a gondola until stage 2 adds the chillers.
+  dairy: [
+    ["susu-fullcream", "butter-250g", "telur-10pk"],
+    ["telur-30-tray", "roti-canai-frozen", "susu-fullcream"],
+  ],
+  household: [
+    ["detergent-1-8kg", "tisu-tandas-10"],
+    ["pencuci-pinggan", "bicarbonate-250g", "detergent-1-8kg"],
+  ],
+  personal: [
+    ["soap-bar", "ubat-gigi"],
+    ["ubat-gigi", "soap-bar", "bicarbonate-250g"],
+  ],
+};
 
 /** Small packs allowed to top up a face's last gap. */
 const FILLER_SKUS: readonly string[] = [
   "soap-bar", "bicarbonate-250g", "garam-500g", "susu-pekat", "belacan-250g", "ubat-gigi",
 ];
 
-function facingWidthM(skuId: string): number {
-  return UNITS_WIDE[skuId] * SKU_PACK_SIZE_M[skuId][0];
+/** Narrowest / widest frontage a planned facing may take. */
+const MIN_FRONTAGE_M = 0.2;
+const MAX_FRONTAGE_M = 0.45;
+/** Knapsack bonus (mm-equivalent) per facing of the face's own group. */
+const GROUP_BONUS_MM = 15;
+
+/** Every (sku, units) facing option with a frontage in [MIN, MAX]; at least one unit. */
+function facingOptions(sku: string): { sku: string; units: number; widthM: number }[] {
+  const w = SKU_PACK_SIZE_M[sku][0];
+  const options: { sku: string; units: number; widthM: number }[] = [];
+  for (let units = 1; units * w <= MAX_FRONTAGE_M + FIT_EPSILON_M; units += 1) {
+    if (units * w >= MIN_FRONTAGE_M - FIT_EPSILON_M || units === 1) options.push({ sku, units, widthM: units * w });
+  }
+  return options;
 }
 
 /**
- * Turn a face's SKU group into a list the greedy fill packs to ≥ 96 %:
- * cycle the group greedily until ~2.6 m remains, then solve the tail as a
- * tiny unbounded knapsack (1 mm resolution) over the group + filler packs.
- * Every chosen facing fits by construction, so computeFacings reproduces it.
+ * Plan one face: the lead SKU takes the first facing, then an unbounded
+ * knapsack (1 mm resolution) packs the rest of the face from (sku, units)
+ * options of the group, the wider department and the small filler packs.
+ * Value = filled mm plus a small bonus for the face's own group, so fill
+ * comes first and the department look second. Every chosen facing fits by
+ * construction, so computeFacings reproduces the plan exactly.
  */
-function fillFaceList(group: readonly string[]): string[] {
-  const list: string[] = [];
-  let cursor = 0;
-  const TAIL_M = 2.6;
-  let index = 0;
-  while (FACE_USABLE_M - cursor > TAIL_M) {
-    const sku = group[index % group.length];
-    index += 1;
-    list.push(sku);
-    cursor += facingWidthM(sku) + FACING_GAP_M;
-  }
+function fillFaceList(group: readonly string[], department: readonly string[] = group): FaceEntry[] {
+  if (group.length === 0) return [];
+  const lead = facingOptions(group[0]).reduce((a, o) => (Math.abs(o.widthM - 0.3) < Math.abs(a.widthM - 0.3) ? o : a));
+  const cursor = lead.widthM + FACING_GAP_M;
   // Capacity includes the trailing gap the last facing doesn't need.
-  const candidates = [...new Set([...group, ...FILLER_SKUS])];
+  const options = [...new Set([...group, ...department, ...FILLER_SKUS])].flatMap(facingOptions);
   const capacityMm = Math.floor((FACE_USABLE_M - cursor + FACING_GAP_M) * 1000 + 1e-6);
-  const weights = candidates.map((sku) => Math.ceil((facingWidthM(sku) + FACING_GAP_M) * 1000 - 1e-6));
+  const weights = options.map((o) => Math.ceil((o.widthM + FACING_GAP_M) * 1000 - 1e-6));
+  const values = options.map(
+    (o, k) => weights[k] + (group.includes(o.sku) ? GROUP_BONUS_MM : department.includes(o.sku) ? GROUP_BONUS_MM / 2 : 0),
+  );
   const best = new Array<number>(capacityMm + 1).fill(0);
   const choice = new Array<number>(capacityMm + 1).fill(-1);
   for (let c = 1; c <= capacityMm; c += 1) {
     best[c] = best[c - 1];
     choice[c] = -2; // inherit from c − 1
-    for (let k = 0; k < candidates.length; k += 1) {
+    for (let k = 0; k < options.length; k += 1) {
       const w = weights[k];
-      if (w <= c && best[c - w] + w > best[c]) {
-        best[c] = best[c - w] + w;
+      if (w <= c && best[c - w] + values[k] > best[c]) {
+        best[c] = best[c - w] + values[k];
         choice[c] = k;
       }
     }
   }
-  const tail: string[] = [];
+  const tail: { sku: string; units: number }[] = [];
   let c = capacityMm;
   while (c > 0) {
     const k = choice[c];
@@ -227,62 +260,75 @@ function fillFaceList(group: readonly string[]): string[] {
       continue;
     }
     if (k < 0) break;
-    tail.push(candidates[k]);
+    tail.push({ sku: options[k].sku, units: options[k].units });
     c -= weights[k];
   }
-  // Group SKUs first, fillers last — reads tidier on the shelf.
-  const isFiller = (sku: string): number => (group.includes(sku) ? 0 : 1);
-  tail.sort((a, b) => isFiller(a) - isFiller(b));
-  return [...list, ...tail];
+  // Group SKUs first, then the department, fillers last; same SKU side by side.
+  const rank = (sku: string): number => (group.includes(sku) ? 0 : department.includes(sku) ? 1 : 2);
+  tail.sort((x, y) => rank(x.sku) - rank(y.sku) || x.sku.localeCompare(y.sku));
+  return [{ sku: lead.sku, units: lead.units }, ...tail];
 }
-
-/**
- * The planogram: one list per board face (faceIndex % PLANOGRAM.length), each
- * packed to ≥ MIN_FACE_FILL_RATIO by fillFaceList. All catalog SKUs appear.
- */
-export const PLANOGRAM: string[][] = FACE_PLAN.map(fillFaceList);
-
-// ---------------------------------------------------------------------------
-// Face enumeration (deterministic, row-major).
-// ---------------------------------------------------------------------------
 
 export interface FaceSlot {
-  /** 0..19, row-major: row → board → side. */
-  faceIndex: number;
-  rowIndex: number;
-  /** Index into the row's stocked boards (tall: 0..2, low: 0). */
-  boardIndex: number;
-  /** 0 = front (fills −z → +z), 1 = back (fills +z → −z, mirrored). */
-  sideIndex: 0 | 1;
-  face: "front" | "back";
+  /** g0..g6 (gondolas west to east), wW / wE (wall runs). */
+  unit: string;
+  run: RunId;
+  /** 0..2 along the run, north to south. */
+  bay: number;
+  /** 0..4, bottom deck to top shelf. */
+  shelf: number;
+  /** x sign of the face normal (1 = east face). */
+  side: 1 | -1;
+  /** Centre plane (gondola) or back panel (wall run) x. */
+  rowX: number;
+  /** Bay centre z. */
+  centerZ: number;
+  /** Board top the packs stand on. */
+  boardY: number;
 }
 
-function buildFaceEnumeration(): FaceSlot[] {
+function buildFaceSlots(): FaceSlot[] {
+  const units: { unit: string; x: number; sides: (1 | -1)[] }[] = [
+    ...GONDOLA_XS.map((x, i) => ({ unit: `g${i}`, x, sides: [1, -1] as (1 | -1)[] })),
+    { unit: "wW", x: WALL_RUN_BACK_XS[0], sides: [1] },
+    { unit: "wE", x: WALL_RUN_BACK_XS[1], sides: [-1] },
+  ];
   const slots: FaceSlot[] = [];
-  let faceIndex = 0;
-  for (let rowIndex = 0; rowIndex < ROW_BOARD_COUNTS.length; rowIndex += 1) {
-    for (let boardIndex = 0; boardIndex < ROW_BOARD_COUNTS[rowIndex]; boardIndex += 1) {
-      for (const sideIndex of [0, 1] as const) {
-        slots.push({
-          faceIndex,
-          rowIndex,
-          boardIndex,
-          sideIndex,
-          face: sideIndex === 0 ? "front" : "back",
+  for (const { unit, x, sides } of units) {
+    for (const { id: run } of RUNS) {
+      bayCenterZs(run).forEach((centerZ, bay) => {
+        SHELF_YS.forEach((boardY, shelf) => {
+          for (const side of sides) slots.push({ unit, run, bay, shelf, side, rowX: x, centerZ, boardY });
         });
-        faceIndex += 1;
-      }
+      });
     }
   }
   return slots;
 }
 
-/**
- * The store's 20 board faces, enumerated row-major (row → board → side).
- * Tall rows stock 3 boards × 2 sides each; the low row (index 1) stocks 1
- * board × 2 sides. The row's SKU list is `PLANOGRAM[faceIndex % PLANOGRAM.length]`.
- */
-export const FACE_ENUMERATION: readonly FaceSlot[] = buildFaceEnumeration();
+/** Every stocked shelf face in the store, ordered unit, run, bay, shelf, side. */
+export const FACE_SLOTS: readonly FaceSlot[] = buildFaceSlots();
+
+const faceListCache = new Map<string, FaceEntry[]>();
+
+/** The planned facings for one face: its department's group, minus packs too tall for the shelf. */
+export function faceSkus(slot: FaceSlot): FaceEntry[] {
+  const groups = DEPARTMENT_GROUPS[RUN_DEPARTMENTS[`${slot.unit}:${slot.run}`]];
+  const n = slot.bay * SHELF_YS.length + slot.shelf;
+  const group = groups[n % groups.length];
+  // Rotate which SKU leads so neighbouring shelves don't repeat the same front facing.
+  const lead = Math.floor(n / groups.length) % group.length;
+  const key = `${slot.unit}:${slot.run}:${n % groups.length}:${lead}:${slot.shelf}`;
+  let list = faceListCache.get(key);
+  if (!list) {
+    const clearance = shelfClearanceM(slot.shelf);
+    const fits = (sku: string): boolean => SKU_PACK_SIZE_M[sku][1] <= clearance;
+    const rotated = [...group.slice(lead), ...group.slice(0, lead)];
+    list = fillFaceList(rotated.filter(fits), [...new Set(groups.flat())].filter(fits));
+    faceListCache.set(key, list);
+  }
+  return list;
+}
 
 // ---------------------------------------------------------------------------
 // Facings (greedy fill across the face).
@@ -299,13 +345,14 @@ export const FACE_ENUMERATION: readonly FaceSlot[] = buildFaceEnumeration();
  * when it fits, and ends when the list is exhausted. Never overflows the
  * face.
  */
-export function computeFacings(faceSkus: string[], usableM: number): Facing[] {
+export function computeFacings(faceSkus: readonly FaceEntry[], usableM: number): Facing[] {
   const facings: Facing[] = [];
   if (!Number.isFinite(usableM) || usableM <= 0) return facings;
 
   let cursor = 0; // occupied width so far, including inter-facing gaps
-  for (const skuId of faceSkus) {
-    const unitsWide = UNITS_WIDE[skuId];
+  for (const entry of faceSkus) {
+    const skuId = entrySku(entry);
+    const unitsWide = typeof entry === "string" ? UNITS_WIDE[skuId] : entry.units;
     const size = SKU_PACK_SIZE_M[skuId];
     if (unitsWide === undefined || size === undefined) {
       throw new Error(`[planogram] Unknown SKU id "${skuId}" in face list`);
@@ -313,14 +360,14 @@ export function computeFacings(faceSkus: string[], usableM: number): Facing[] {
     const widthM = unitsWide * size[0];
     if (cursor + widthM > usableM + FIT_EPSILON_M) continue; // skip what does not fit; keep walking
     const packDepthM = size[2];
-    let depth: 1 | 2 | 3 = 1;
-    for (const d of [3, 2] as const) {
-      if (d * packDepthM + (d - 1) * GAP_M <= FACE_HALF_M + FIT_EPSILON_M) {
+    let depth = 1;
+    for (let d = MAX_DEPTH; d >= 2; d -= 1) {
+      if (d * packDepthM + (d - 1) * GAP_M <= STOCK_DEPTH_M + FIT_EPSILON_M) {
         depth = d;
         break;
       }
     }
-    facings.push({ skuId, lengthM: depth * packDepthM + (depth - 1) * GAP_M, depth, widthM });
+    facings.push({ skuId, lengthM: depth * packDepthM + (depth - 1) * GAP_M, depth, unitsWide, widthM });
     cursor += widthM + FACING_GAP_M;
   }
   return facings;
@@ -371,7 +418,7 @@ export function computePlacements(
   for (const facing of facings) {
     const size = SKU_PACK_SIZE_M[facing.skuId];
     if (!size) throw new Error(`[planogram] Unknown SKU id "${facing.skuId}"`);
-    const unitsWide = UNITS_WIDE[facing.skuId];
+    const unitsWide = facing.unitsWide;
     const packDepthM = size[2];
     const overhang = packDepthM > FACE_HALF_M; // centre-plane flush; front lip overhang
     for (let row = 0; row < facing.depth; row += 1) {
