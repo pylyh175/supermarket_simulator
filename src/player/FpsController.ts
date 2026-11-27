@@ -13,6 +13,7 @@ import * as THREE from "three";
 import { moveVector, eyeHeightM, type MoveKeys } from "./movement";
 import { circleAabbResolve, clampToBounds, type Aabb } from "./colliders";
 import { limitYaw, softLimit, type LookLimits } from "./lookLimits";
+import { SPAWN, STORE_DEPTH_M, STORE_WIDTH_M } from "../game/storeGeometry";
 
 // Comfortable cozy walking pace (brief: ~2.5–3 m/s). Diagonal is already
 // normalized inside moveVector, so diagonal walking is not faster.
@@ -24,12 +25,17 @@ const PITCH_LIMIT_RAD = (85 * Math.PI) / 180; // ±85° per brief
 // through walls — also enforced by the caller, belt and braces.
 const MAX_DELTA_S = 0.05;
 
-// Interior bounds (20 × 14 m, centred on origin) — matches storeShell.ts.
-const DEFAULT_BOUNDS: Aabb = { minX: -10, minZ: -7, maxX: 10, maxZ: 7 };
+// Interior bounds, centred on origin — matches storeShell.ts.
+const DEFAULT_BOUNDS: Aabb = {
+  minX: -STORE_WIDTH_M / 2,
+  minZ: -STORE_DEPTH_M / 2,
+  maxX: STORE_WIDTH_M / 2,
+  maxZ: STORE_DEPTH_M / 2,
+};
 
-// Spawn near the entrance side (+Z), facing into the store (-Z).
-const SPAWN_X = 0;
-const SPAWN_Z = 4;
+// Start of day behind the till, facing into the store (-Z).
+const SPAWN_X = SPAWN.x;
+const SPAWN_Z = SPAWN.z;
 
 export class FpsController {
   // Not readonly: buildStore() resolves after construction, so main.ts swaps

@@ -3,6 +3,7 @@ import "../style.css";
 import { WebGLCheck } from "./WebGLCheck";
 import { buildStoreShell } from "./storeShell";
 import { buildStore, TILL_X, TILL_Z } from "./storeLayout";
+import { STAND_OFFSET_X_M } from "../game/storeGeometry";
 import { loadAssets } from "./assets";
 import { FpsController } from "../player/FpsController";
 import { eyeHeightM } from "../player/movement";
@@ -67,17 +68,17 @@ function boot(): void {
   document.getElementById("game")?.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color("#f5efe0"); // warm cream
+  scene.background = new THREE.Color("#eef2f5");
 
-  // Cozy warm lighting, flat-shaded look — shadows intentionally OFF.
-  const hemisphere = new THREE.HemisphereLight(0xfff3e0, 0xb89a72, 1.0);
+  // Bright cool-white supermarket lighting (~5000 K strip lights are
+  // emissive meshes in storeShell) — shadows intentionally OFF.
+  const hemisphere = new THREE.HemisphereLight(0xf4f8ff, 0xb4bbc0, 2.0);
   scene.add(hemisphere);
-  const sun = new THREE.DirectionalLight(0xffe6c0, 1.4);
-  sun.position.set(6, 9, 4);
+  const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+  sun.position.set(4, 12, 6);
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0xffe0bd, 0.5);
-  fill.position.set(-5, 6, -8);
-  scene.add(fill);
+  // Even fill so walls facing away from the key light don't read grey.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 
   const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
   camera.rotation.order = "YXZ"; // yaw (Y) then pitch (X)
@@ -639,8 +640,7 @@ function boot(): void {
       }
       try {
         // POS stand beside the counter's east end, on the cashier's right.
-        const counterBox = new THREE.Box3().setFromObject(bundle.counter);
-        const standX = TILL_X + counterBox.max.x + 0.06 + STAND_W / 2;
+        const standX = TILL_X + STAND_OFFSET_X_M;
         const standZ = TILL_Z + 0.12;
         machine = new CashierMachine(scene, {
           position: new THREE.Vector3(standX, 0, standZ),
@@ -679,6 +679,8 @@ function boot(): void {
   if (import.meta.env.DEV) {
     (window as unknown as { __sim: unknown }).__sim = {
       player,
+      renderer,
+      scene,
       camera,
       customers: () => customers,
       machine: () => machine,
